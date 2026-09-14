@@ -9,7 +9,6 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Aegis OS Dashboard API", version="9.0")
 
-# Configuración de CORS adaptada para Serveo e interfaces externas
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -46,7 +45,6 @@ class EditarPerfilSchema(BaseModel):
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +54,6 @@ def init_db():
             avatar TEXT DEFAULT '👤'
         )
     """)
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dispositivos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,21 +66,18 @@ def init_db():
             estado TEXT DEFAULT 'ONLINE'
         )
     """)
-    
     cursor.execute("SELECT COUNT(*) FROM usuarios")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO usuarios (nombre, pin, rol, avatar) VALUES ('Manuel', '1234', 'Administrador', '👨‍💻')")
         cursor.execute("INSERT INTO usuarios (nombre, pin, rol, avatar) VALUES ('Jessica', '1111', 'Estudiante', '🎓')")
         cursor.execute("INSERT INTO usuarios (nombre, pin, rol, avatar) VALUES ('Trabajo', '2222', 'Operador', '💼')")
         cursor.execute("INSERT INTO usuarios (nombre, pin, rol, avatar) VALUES ('Invitado', '0000', 'Invitado', '👤')")
-    
     cursor.execute("SELECT COUNT(*) FROM dispositivos")
     if cursor.fetchone()[0] == 0:
         cursor.execute("""
             INSERT INTO dispositivos (nombre, ip, mac, ubicacion, lat, lng, estado) 
             VALUES ('Equipo Principal Local', '127.0.0.1', '00:11:22:33:44:55', 'Ubicación Detectada', -12.0464, -77.0428, 'ONLINE')
         """)
-    
     conn.commit()
     conn.close()
 
@@ -140,9 +134,17 @@ def listar_dispositivos(user: dict = Depends(verificar_pin)):
 
     cpu_val = f"{psutil.cpu_percent(interval=None)}%"
     ram_val = f"{psutil.virtual_memory().percent}%"
-    disco_val = f"{psutil.disk_usage('/').percent}%"
-    battery = psutil.sensors_battery()
-    bat_val = f"{int(battery.percent)}%" if battery else "AC Directo"
+    
+    try:
+        disco_val = f"{psutil.disk_usage('/').percent}%"
+    except Exception:
+        disco_val = "N/A"
+
+    try:
+        battery = psutil.sensors_battery()
+        bat_val = f"{int(battery.percent)}%" if battery else "AC Directo"
+    except Exception:
+        bat_val = "Servidor Nube"
 
     dispositivos = []
     for r in rows:
@@ -203,19 +205,17 @@ def editar_perfil(data: EditarPerfilSchema, user: dict = Depends(verificar_pin))
 def controlar_energia(dev_id: int, data: AccionEnergia, user: dict = Depends(verificar_pin)):
     accion = data.accion.upper()
     try:
-        if accion == "BLOQUEAR":
-            subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"], shell=True)
-            return {"mensaje": "Equipo bloqueado"}
-        elif accion == "APAGAR":
-            subprocess.run(["shutdown", "/s", "/t", "5"], shell=True)
-            return {"mensaje": "Apagando..."}
-        elif accion == "REINICIAR":
-            subprocess.run(["shutdown", "/r", "/t", "5"], shell=True)
-            return {"mensaje": "Reiniciando..."}
-        elif accion == "ENCENDER":
-            return {"mensaje": "Comando Wake-On-LAN enviado"}
-        else:
-            raise HTTPException(status_code=400, detail="Acción no soportada")
+        if os.name == 'nt':
+            if accion == "BLOQUEAR":
+                subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"], shell=True)
+                return {"mensaje": "Equipo bloqueado"}
+            elif accion == "APAGAR":
+                subprocess.run(["shutdown", "/s", "/t", "5"], shell=True)
+                return {"mensaje": "Apagando..."}
+            elif accion == "REINICIAR":
+                subprocess.run(["shutdown", "/r", "/t", "5"], shell=True)
+                return {"mensaje": "Reiniciando..."}
+        return {"mensaje": f"Comando {accion} registrado (Modo Nube)"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
