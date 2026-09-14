@@ -20,6 +20,7 @@ app.add_middleware(
 
 DB_NAME = "familia_control.db"
 
+# Modelos Pydantic
 class AccionEnergia(BaseModel):
     accion: str
 
@@ -42,6 +43,7 @@ class EditarPerfilSchema(BaseModel):
     pin: str
     avatar: str
 
+# Inicialización de la base de datos
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -72,6 +74,7 @@ def init_db():
         cursor.execute("INSERT INTO usuarios (nombre, pin, rol, avatar) VALUES ('Jessica', '1111', 'Estudiante', '🎓')")
         cursor.execute("INSERT INTO usuarios (nombre, pin, rol, avatar) VALUES ('Trabajo', '2222', 'Operador', '💼')")
         cursor.execute("INSERT INTO usuarios (nombre, pin, rol, avatar) VALUES ('Invitado', '0000', 'Invitado', '👤')")
+    
     cursor.execute("SELECT COUNT(*) FROM dispositivos")
     if cursor.fetchone()[0] == 0:
         cursor.execute("""
@@ -83,6 +86,7 @@ def init_db():
 
 init_db()
 
+# Dependencia de seguridad para verificar el PIN
 def verificar_pin(x_pin: str = Header(None)):
     if not x_pin:
         raise HTTPException(status_code=401, detail="Falta el PIN de autorización")
@@ -95,6 +99,7 @@ def verificar_pin(x_pin: str = Header(None)):
         raise HTTPException(status_code=403, detail="PIN no válido")
     return {"id": user[0], "nombre": user[1], "rol": user[2], "avatar": user[3], "pin": user[4]}
 
+# Rutas públicas y de interfaz
 @app.get("/")
 def cargar_interfaz():
     if not os.path.exists("index.html"):
@@ -105,8 +110,8 @@ def cargar_interfaz():
 def obtener_usuarios_publico():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, nombre, avatar, rol, pin FROM usuarios")
-    users = [{"id": r[0], "nombre": r[1], "avatar": r[2], "rol": r[3], "pin": r[4]} for r in cursor.fetchall()]
+    cursor.execute("SELECT id, nombre, avatar, rol FROM usuarios")
+    users = [{"id": r[0], "nombre": r[1], "avatar": r[2], "rol": r[3]} for r in cursor.fetchall()]
     conn.close()
     return users
 
@@ -124,6 +129,7 @@ def crear_usuario(data: NuevoPerfilSchema):
     conn.close()
     return {"mensaje": "Perfil creado exitosamente"}
 
+# Rutas protegidas
 @app.get("/dispositivos")
 def listar_dispositivos(user: dict = Depends(verificar_pin)):
     conn = sqlite3.connect(DB_NAME)
@@ -207,13 +213,13 @@ def controlar_energia(dev_id: int, data: AccionEnergia, user: dict = Depends(ver
     try:
         if os.name == 'nt':
             if accion == "BLOQUEAR":
-                subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"], shell=True)
+                subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"])
                 return {"mensaje": "Equipo bloqueado"}
             elif accion == "APAGAR":
-                subprocess.run(["shutdown", "/s", "/t", "5"], shell=True)
+                subprocess.run(["shutdown", "/s", "/t", "5"])
                 return {"mensaje": "Apagando..."}
             elif accion == "REINICIAR":
-                subprocess.run(["shutdown", "/r", "/t", "5"], shell=True)
+                subprocess.run(["shutdown", "/r", "/t", "5"])
                 return {"mensaje": "Reiniciando..."}
         return {"mensaje": f"Comando {accion} registrado (Modo Nube)"}
     except Exception as e:
@@ -221,4 +227,4 @@ def controlar_energia(dev_id: int, data: AccionEnergia, user: dict = Depends(ver
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000) 
