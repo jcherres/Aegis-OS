@@ -81,7 +81,6 @@
         <input type="password" id="editPin" class="bg-slate-900 border border-slate-700 text-white px-3 py-2 rounded-xl text-sm focus:outline-none focus:border-cyan-500">
       </div>
 
-      <!-- TECLADO VIRTUAL DE AVATARES -->
       <div class="flex flex-col gap-2">
         <label class="text-[10px] font-bold text-slate-400 text-left">SELECCIONA TU AVATAR</label>
         <div class="flex justify-center items-center gap-3 mb-2">
@@ -278,7 +277,6 @@
   </div>
 
   <script>
-    // Se usa una ruta relativa vacía para que consulte dinámicamente al mismo host (localhost o Serveo)
     const API = "";
     let perfilSeleccionado = null;
     let pinActivo = "";
@@ -424,14 +422,86 @@
           document.getElementById('userNombre').innerText = data.nombre;
           document.getElementById('userAvatar').innerText = data.avatar;
           cerrarModalEditarPerfil();
+        } else {
+          const err = await res.json();
+          alert(err.detail || "Error al actualizar perfil");
         }
-      } catch (e) { alert("Error al editar perfil."); }
+      } catch (e) { alert("Error de red al actualizar perfil."); }
+    }
+
+    async function actualizarPanel() {
+      try {
+        const res = await fetch(`${API}/dispositivos`, { headers: { "x-pin": pinActivo } });
+        if (!res.ok) return;
+        dispositivos = await res.json();
+
+        const lista = document.getElementById('listaDispositivos');
+        lista.innerHTML = '';
+
+        if (dispositivos.length > 0 && idSeleccionado === null) {
+          idSeleccionado = dispositivos[0].id;
+        }
+
+        dispositivos.forEach(dev => {
+          const active = dev.id === idSeleccionado;
+          const card = document.createElement('div');
+          card.className = `p-3 rounded-xl border cursor-pointer transition flex justify-between items-center ${active ? 'bg-cyan-950/40 border-cyan-500/50' : 'bg-slate-900/50 border-slate-800 hover:border-slate-700'}`;
+          card.onclick = () => seleccionarDispositivo(dev.id);
+          card.innerHTML = `
+            <div>
+              <h4 class="text-xs font-bold text-white">${dev.nombre}</h4>
+              <span class="text-[10px] font-mono text-slate-500">${dev.ip}</span>
+            </div>
+            <span class="text-[9px] px-2 py-0.5 rounded font-bold font-mono ${dev.estado === 'ONLINE' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}">${dev.estado}</span>
+          `;
+          lista.appendChild(card);
+        });
+
+        const target = dispositivos.find(d => d.id === idSeleccionado);
+        if (target) {
+          document.getElementById('targetNombre').innerText = target.nombre;
+          document.getElementById('mCpu').innerText = target.specs.cpu;
+          document.getElementById('mRam').innerText = target.specs.ram;
+          document.getElementById('mDisco').innerText = target.specs.disco;
+          document.getElementById('mBat').innerText = target.specs.bateria;
+          document.getElementById('mProc').innerText = target.specs.procesos;
+
+          const esLocal = target.ip === "127.0.0.1" || target.ip === "localhost";
+          if (esLocal) {
+            document.getElementById('bannerDispositivoLocal').classList.remove('hidden');
+            document.getElementById('seccionRemota').classList.add('hidden');
+          } else {
+            document.getElementById('bannerDispositivoLocal').classList.add('hidden');
+            document.getElementById('seccionRemota').classList.remove('hidden');
+            const mapUrl = `https://maps.google.com/maps?q=${target.lat},${target.lng}&z=13&output=embed`;
+            document.getElementById('gmapsIframe').src = mapUrl;
+          }
+        }
+      } catch (e) { console.error("Error actualizando datos:", e); }
+    }
+
+    function seleccionarDispositivo(id) {
+      idSeleccionado = id;
+      actualizarPanel();
+    }
+
+    async function ejecutarComando(accion) {
+      if (!idSeleccionado) return;
+      try {
+        const res = await fetch(`${API}/dispositivos/${idSeleccionado}/energia`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-pin': pinActivo },
+          body: JSON.stringify({ accion })
+        });
+        const data = await res.json();
+        alert(data.mensaje || `Comando ${accion} enviado`);
+      } catch (e) { alert("Error al ejecutar el comando"); }
     }
 
     async function crearNuevoPerfilModal() {
-      const nombre = prompt("Nombre del perfil:");
+      const nombre = prompt("Nombre del nuevo perfil:");
       if (!nombre) return;
-      const pin = prompt("PIN:");
+      const pin = prompt("PIN para el perfil:");
       if (!pin) return;
 
       try {
@@ -440,144 +510,21 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ nombre, pin, avatar: "👤", rol: "Usuario" })
         });
-        if (res.ok) { cargarPerfiles(); }
-      } catch (e) { alert("Error al crear perfil."); }
-    }
-
-    async function actualizarPanel() {
-      try {
-        const res = await fetch(`${API}/dispositivos`, { headers: { "x-pin": pinActivo } });
-        if (!res.ok) return;
-
-        dispositivos = await res.json();
-        if (dispositivos.length > 0 && !idSeleccionado) {
-          idSeleccionado = dispositivos[0].id;
-        }
-
-        renderDispositivos();
-      } catch (e) { console.error(e); }
-    }
-
-    function renderDispositivos() {
-      const cont = document.getElementById('listaDispositivos');
-      cont.innerHTML = '';
-
-      let devEncontrado = null;
-
-      dispositivos.forEach((dev, index) => {
-        const esLocal = dev.esLocal || dev.esLider || index === 0;
-        
-        const sel = dev.id === idSeleccionado;
-        if (sel) {
-          devEncontrado = dev;
-          devEncontrado._esLocalCalculado = esLocal;
-        }
-
-        const div = document.createElement('div');
-        div.className = `p-4 rounded-xl border flex justify-between items-center transition cursor-pointer ${sel ? 'bg-cyan-950/40 border-cyan-500 shadow-lg shadow-cyan-950/50' : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'}`;
-        
-        div.onclick = () => { idSeleccionado = dev.id; renderDispositivos(); };
-
-        const isOnline = dev.estado === 'ONLINE';
-
-        div.innerHTML = `
-          <div class="flex items-center gap-3">
-            <div class="text-2xl ${esLocal ? 'text-cyan-400' : 'text-slate-400'}">
-              <i class="${esLocal ? 'fa-solid fa-laptop-code' : 'fa-solid fa-laptop'}"></i>
-            </div>
-            <div>
-              <div class="text-xs font-bold text-white flex items-center gap-2">
-                ${dev.nombre}
-                ${esLocal ? '<span class="text-[9px] bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-1.5 py-0.2 rounded font-mono">LOCAL</span>' : ''}
-              </div>
-              <div class="text-[10px] font-mono text-slate-500">${dev.ip}</div>
-            </div>
-          </div>
-          <div class="flex items-center gap-2">
-            ${!esLocal ? `
-              <button onclick="event.stopPropagation(); modalEditarDispositivo(${dev.id}, '${dev.nombre}', '${dev.ip}')" class="text-slate-500 hover:text-cyan-400 text-xs p-1">
-                <i class="fa-solid fa-pen"></i>
-              </button>
-            ` : ''}
-            <span class="text-[10px] font-mono font-bold px-2 py-1 rounded-md border ${isOnline ? 'border-emerald-800 bg-emerald-950 text-emerald-400' : 'border-rose-800 bg-rose-950 text-rose-400'}">
-              ${dev.estado}
-            </span>
-          </div>
-        `;
-        cont.appendChild(div);
-      });
-
-      if (devEncontrado && devEncontrado.specs) {
-        document.getElementById('targetNombre').innerText = `${devEncontrado.nombre} (${devEncontrado.ip})`;
-        document.getElementById('mCpu').innerText = devEncontrado.specs.cpu;
-        document.getElementById('mRam').innerText = devEncontrado.specs.ram;
-        document.getElementById('mDisco').innerText = devEncontrado.specs.disco;
-        document.getElementById('mBat').innerText = devEncontrado.specs.bateria;
-        document.getElementById('mProc').innerText = devEncontrado.specs.procesos;
-
-        const esMaquinaLocal = devEncontrado._esLocalCalculado;
-
-        if (esMaquinaLocal) {
-          document.getElementById('bannerDispositivoLocal').classList.remove('hidden');
-          document.getElementById('seccionRemota').classList.add('hidden');
+        if (res.ok) {
+          alert("Perfil creado con éxito");
+          cargarPerfiles();
         } else {
-          document.getElementById('bannerDispositivoLocal').classList.add('hidden');
-          document.getElementById('seccionRemota').classList.remove('hidden');
-
-          const lat = devEncontrado.lat || 19.4326;
-          const lng = devEncontrado.lng || -99.1332;
-          const mapUrl = `https://maps.google.com/maps?q=${lat},${lng}&z=14&output=embed`;
-          document.getElementById('gmapsIframe').src = mapUrl;
+          const err = await res.json();
+          alert(err.detail || "Error al crear perfil");
         }
-
-      } else {
-        document.getElementById('targetNombre').innerText = "Seleccione un dispositivo";
-        document.getElementById('mCpu').innerText = "--";
-        document.getElementById('mRam').innerText = "--";
-        document.getElementById('mDisco').innerText = "--";
-        document.getElementById('mBat').innerText = "--";
-        document.getElementById('mProc').innerText = "--";
-      }
-    }
-
-    async function modalEditarDispositivo(id, nombreAct, ipAct) {
-      const nombre = prompt("Nuevo nombre:", nombreAct);
-      const codigo = prompt("Nuevo Código / Dirección:", ipAct);
-      if (!nombre || !codigo) return;
-
-      try {
-        await fetch(`${API}/dispositivos/${id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', 'x-pin': pinActivo },
-          body: JSON.stringify({ nombre, ip: codigo })
-        });
-        await actualizarPanel();
-      } catch (e) { alert("Error al editar dispositivo."); }
-    }
-
-    async function ejecutarComando(accion) {
-      if (!idSeleccionado) { alert("Por favor, selecciona un dispositivo."); return; }
-      
-      const dev = dispositivos.find(d => d.id === idSeleccionado);
-      const nombreDev = dev ? dev.nombre : "dispositivo";
-
-      if (!confirm(`¿Deseas ejecutar "${accion}" de forma remota en ${nombreDev}?`)) {
-        return;
-      }
-
-      try {
-        const res = await fetch(`${API}/dispositivos/${idSeleccionado}/energia`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-pin': pinActivo },
-          body: JSON.stringify({ accion: accion })
-        });
-        const data = await res.json();
-        alert(`Respuesta del Servidor: ${data.mensaje}`);
-      } catch (e) { alert("Error enviando el comando."); }
+      } catch (e) { alert("Error de red al crear perfil"); }
     }
 
     function cerrarSesion() {
-      clearInterval(timerLoop);
+      if (timerLoop) clearInterval(timerLoop);
+      pinActivo = "";
+      perfilSeleccionado = null;
+      idSeleccionado = null;
       document.getElementById('vistaDashboard').classList.add('hidden');
       document.getElementById('vistaBienvenida').classList.remove('hidden');
     }
