@@ -912,7 +912,7 @@ public class AegisAgent {
                 if (so.contains("win") && linea.contains(",") && !lLower.contains("tasklist") && !lLower.contains("svchost") && !lLower.contains("explorer")) {
                     String[] partes = linea.split(",");
                     if (partes.length >= 9 && partes[8].length() > 2) {
-                        String titulo = partes[8].replace("\"", "").trim();
+                        String titulo = partes[8].replace("\\"", "").trim();
                         if (!titulo.equalsIgnoreCase("n/a") && !titulo.isEmpty()) {
                             ventanaDetectada = titulo;
                         }
@@ -926,7 +926,7 @@ public class AegisAgent {
 
     private static boolean vincularConPin(String pin) {
         try {
-            String payload = String.format("{\"pin\":\"%s\",\"nombre_equipo\":\"%s\",\"usuario_actual\":\"%s\"}",
+            String payload = String.format("{\\"pin\\":\\"%s\\",\\"nombre_equipo\\":\\"%s\\",\\"usuario_actual\\":\\"%s\\"}",
                 pin, InetAddress.getLocalHost().getHostName(), System.getProperty("user.name"));
             URL url = new URL(SERVER_URL + "/agente/vincular");
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -962,8 +962,8 @@ public class AegisAgent {
             double disco = ((double)(root.getTotalSpace() - root.getFreeSpace()) / root.getTotalSpace()) * 100.0;
             double epochActual = System.currentTimeMillis() / 1000.0;
 
-            String ventanaEscapada = ultimaVentanaDetectada.replace("\"", "'");
-            String payload = String.format("{\"familia_id\":\"%s\",\"dispositivo_id\":\"%s\",\"nombre_equipo\":\"%s\",\"usuario_actual\":\"%s\",\"cpu_uso\":%.1f,\"ram_uso\":%.1f,\"disco_uso\":%.1f,\"client_epoch\":%.1f,\"ventana_activa\":\"%s\"}",
+            String ventanaEscapada = ultimaVentanaDetectada.replace("\\"", "'");
+            String payload = String.format("{\\"familia_id\\":\\"%s\\",\\"dispositivo_id\\":\\"%s\\",\\"nombre_equipo\\":\\"%s\\",\\"usuario_actual\\":\\"%s\\",\\"cpu_uso\\":%.1f,\\"ram_uso\\":%.1f,\\"disco_uso\\":%.1f,\\"client_epoch\\":%.1f,\\"ventana_activa\\":\\"%s\\"}",
                 FAMILIA_ID, DISPOSITIVO_ID, InetAddress.getLocalHost().getHostName(), System.getProperty("user.name"), cpu, ram, disco, epochActual, ventanaEscapada);
             URL url = new URL(SERVER_URL + "/agente/telemetria");
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -978,11 +978,11 @@ public class AegisAgent {
     }
 
     private static String extraerValor(String json, String clave) {
-        String p = "\"" + clave + "\":\"";
+        String p = "\\"" + clave + "\\":\\"";
         int i = json.indexOf(p);
         if (i == -1) return "";
         i += p.length();
-        int f = json.indexOf("\"", i);
+        int f = json.indexOf("\\"", i);
         return (f != -1) ? json.substring(i, f) : "";
     }
 }
@@ -1043,6 +1043,7 @@ APP_JS = """
 let FAMILIA_ID = "FAMILIA-ALPHA-PERU";
 let MASTER_TOKEN = sessionStorage.getItem("AEGIS_SESSION_TOKEN") || null;
 let map = null, markers = null, socket = null, deferredPrompt = null;
+let TAB_ACTIVA = "familiar";
 
 let miGraficoProductividad = null;
 
@@ -1068,7 +1069,7 @@ async function actualizarGraficoProductividad() {
                 datasets: [{
                     data: [data.tiempo_estudio_minutos, data.tiempo_ocio_minutos],
                     backgroundColor: ['#00ff66', '#ff0055'],
-                    borderColor: '#010409',
+                    borderColor: '#0f172a',
                     borderWidth: 2
                 }]
             },
@@ -1091,7 +1092,10 @@ if ('serviceWorker' in navigator) {
 
 function initMap() {
     map = L.map('map-radar', { zoomControl: false }).setView([-9.19, -75.015], 5);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
     markers = L.layerGroup().addTo(map);
 }
 
@@ -1100,6 +1104,30 @@ function initSocket() {
     socket = new WebSocket(`${proto}//${location.host}/ws/canal/${FAMILIA_ID}`);
     socket.onmessage = () => syncState();
     socket.onclose = () => setTimeout(initSocket, 3000);
+}
+
+function cambiarPestana(tab) {
+    TAB_ACTIVA = tab;
+    ['familiar', 'aula', 'inteligencia'].forEach(t => {
+        const panel = document.getElementById(`tab-content-${t}`);
+        if (panel) panel.classList.toggle('hidden', t !== tab);
+        const btn = document.getElementById(`tab-btn-${t}`);
+        if (btn) {
+            if (t === tab) {
+                btn.classList.add('bg-slate-800', 'text-white', 'border-slate-600');
+                btn.classList.remove('text-slate-400', 'border-transparent');
+            } else {
+                btn.classList.remove('bg-slate-800', 'text-white', 'border-slate-600');
+                btn.classList.add('text-slate-400', 'border-transparent');
+            }
+        }
+    });
+    if (tab === 'familiar' && map) {
+        setTimeout(() => map.invalidateSize(), 150);
+    }
+    if (tab === 'inteligencia') {
+        actualizarGraficoProductividad();
+    }
 }
 
 async function autenticarTutor(e) {
@@ -1153,10 +1181,9 @@ async function syncState() {
 
         // Renderizado Inteligente según el cliente: Hogar vs Empresa
         if (tipoEntorno === "EMPRESA") {
-            document.getElementById('panel-radar-satelital').classList.add('hidden'); // Oculta mapa en aula
             renderVistaEmpresarialGrid(data.dispositivos); // Activa matriz compacta de laboratorio
+            actualizarRadar(data.dispositivos);
         } else {
-            document.getElementById('panel-radar-satelital').classList.remove('hidden');
             renderDispositivos(data.dispositivos);
             actualizarRadar(data.dispositivos);
         }
@@ -1181,7 +1208,7 @@ function renderDispositivos(dispositivos) {
         const critico = (d.cpu_uso > 85 || d.ram_uso > 90);
         const trampaReloj = Boolean(d.alerta_reloj);
         const card = document.createElement('div');
-        card.className = `glass-panel rounded-xl p-5 relative transition duration-300 ${trampaReloj ? 'border-yellow-500 shadow-[0_0_20px_rgba(255,183,0,0.4)]' : (critico ? 'border-pink-500/80 alert-critical' : 'border-cyan-500/30')}`;
+        card.className = `bg-slate-900/60 rounded-2xl p-5 relative transition duration-300 border ${trampaReloj ? 'border-amber-500/60 shadow-[0_0_20px_rgba(245,158,11,0.15)]' : (critico ? 'border-rose-500/60 alert-critical' : 'border-slate-800')}`;
         card.innerHTML = `
             <div class="flex items-center justify-between pb-3 border-b border-slate-800">
                 <div>
@@ -1189,41 +1216,41 @@ function renderDispositivos(dispositivos) {
                         <span class="w-2.5 h-2.5 rounded-full ${d.estado_en_linea ? 'bg-cyberCyan shadow-[0_0_8px_#00f0ff]' : 'bg-red-500 shadow-[0_0_8px_#ff0000]'}"></span>
                         <h4 class="font-black text-sm tracking-wider text-white">${d.nombre_equipo}</h4>
                     </div>
-                    <p class="text-[11px] text-slate-400 mt-0.5">ASIGNADO: <span class="text-yellow-400 font-bold">${d.hijo_nombre || 'Sin Asignar'}</span> | IP: ${d.ip_dinamica}</p>
+                    <p class="text-[11px] text-slate-400 mt-0.5">ASIGNADO: <span class="text-amber-400 font-bold">${d.hijo_nombre || 'Sin Asignar'}</span> | IP: ${d.ip_dinamica}</p>
                 </div>
                 <div class="text-right">
                     <span class="text-[10px] text-slate-300 font-bold block">${d.ciudad}</span>
-                    <span class="text-[10px] font-bold ${trampaReloj ? 'text-yellow-400 font-black' : (!d.estado_en_linea ? 'text-red-500' : 'text-cyberCyan')}">
+                    <span class="text-[10px] font-bold ${trampaReloj ? 'text-amber-400 font-black' : (!d.estado_en_linea ? 'text-red-500' : 'text-cyberCyan')}">
                         ${trampaReloj ? '⚠️ TRAMPA DE RELOJ' : (!d.estado_en_linea ? 'DESCONECTADO' : 'EN LÍNEA')}
                     </span>
                 </div>
             </div>
 
-            <div class="my-2.5 bg-black/40 p-2 rounded border border-slate-800 flex items-center justify-between">
+            <div class="my-2.5 bg-black/30 p-2 rounded-lg border border-slate-800 flex items-center justify-between">
                 <span class="text-[10px] text-slate-400 uppercase">Actividad:</span>
-                <span class="text-[11px] font-bold text-yellow-400 truncate max-w-[220px]">👀 ${d.ventana_activa || 'Escritorio / IDLE'}</span>
+                <span class="text-[11px] font-bold text-amber-400 truncate max-w-[220px]">👀 ${d.ventana_activa || 'Escritorio / IDLE'}</span>
             </div>
 
             <div class="grid grid-cols-3 gap-3 my-3">
-                <div class="bg-black/50 p-2 rounded border border-slate-800">
+                <div class="bg-black/30 p-2 rounded-lg border border-slate-800">
                     <div class="flex justify-between text-[10px] mb-1"><span class="text-slate-400">CPU</span><span class="font-bold text-cyberCyan">${d.cpu_uso}%</span></div>
-                    <div class="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden"><div class="h-full bg-cyberCyan" style="width:${d.cpu_uso}%"></div></div>
+                    <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden"><div class="h-full bg-cyberCyan" style="width:${d.cpu_uso}%"></div></div>
                 </div>
-                <div class="bg-black/50 p-2 rounded border border-slate-800">
+                <div class="bg-black/30 p-2 rounded-lg border border-slate-800">
                     <div class="flex justify-between text-[10px] mb-1"><span class="text-slate-400">RAM</span><span class="font-bold text-cyberCyan">${d.ram_uso}%</span></div>
-                    <div class="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden"><div class="h-full bg-cyberCyan" style="width:${d.ram_uso}%"></div></div>
+                    <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden"><div class="h-full bg-cyberCyan" style="width:${d.ram_uso}%"></div></div>
                 </div>
-                <div class="bg-black/50 p-2 rounded border border-slate-800">
+                <div class="bg-black/30 p-2 rounded-lg border border-slate-800">
                     <div class="flex justify-between text-[10px] mb-1"><span class="text-slate-400">DISCO</span><span class="font-bold text-white">${d.disco_uso}%</span></div>
-                    <div class="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden"><div class="h-full bg-slate-400" style="width:${d.disco_uso}%"></div></div>
+                    <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden"><div class="h-full bg-slate-400" style="width:${d.disco_uso}%"></div></div>
                 </div>
             </div>
 
             <div class="grid grid-cols-4 gap-1.5 pt-2">
-                <button onclick="disparar('${d.dispositivo_id}','BLOQUEAR_SISTEMA')" class="tactical-btn py-1.5 rounded text-[10px] font-bold text-yellow-400">BLOQUEAR</button>
-                <button onclick="disparar('${d.dispositivo_id}','DESBLOQUEAR')" class="tactical-btn py-1.5 rounded text-[10px] font-bold text-neonGreen">LIBERAR</button>
-                <button onclick="disparar('${d.dispositivo_id}','REINICIAR')" class="tactical-btn py-1.5 rounded text-[10px] font-bold text-cyberCyan">REINICIAR</button>
-                <button onclick="disparar('${d.dispositivo_id}','APAGAR')" class="tactical-btn danger-btn py-1.5 rounded text-[10px] font-bold text-cyberPink">APAGAR</button>
+                <button onclick="disparar('${d.dispositivo_id}','BLOQUEAR_SISTEMA')" class="tactical-btn py-1.5 rounded-lg text-[10px] font-bold text-amber-400">BLOQUEAR</button>
+                <button onclick="disparar('${d.dispositivo_id}','DESBLOQUEAR')" class="tactical-btn py-1.5 rounded-lg text-[10px] font-bold text-neonGreen">LIBERAR</button>
+                <button onclick="disparar('${d.dispositivo_id}','REINICIAR')" class="tactical-btn py-1.5 rounded-lg text-[10px] font-bold text-cyberCyan">REINICIAR</button>
+                <button onclick="disparar('${d.dispositivo_id}','APAGAR')" class="tactical-btn danger-btn py-1.5 rounded-lg text-[10px] font-bold text-cyberPink">APAGAR</button>
             </div>
         `;
         grid.appendChild(card);
@@ -1244,14 +1271,14 @@ function renderVistaEmpresarialGrid(dispositivos) {
         const trampaReloj = Boolean(d.alerta_reloj);
 
         const gridCard = document.createElement('div');
-        gridCard.className = `border p-3 rounded-xl flex flex-col justify-between transition ${
+        gridCard.className = `border p-3 rounded-2xl flex flex-col justify-between transition ${
             tieneInfraccion
-                ? 'bg-red-950/30 border-cyberPink shadow-[0_0_15px_#ff0055] alert-critical'
+                ? 'bg-rose-950/20 border-rose-500/60 alert-critical'
                 : trampaReloj
-                    ? 'bg-slate-950 border-yellow-500 shadow-[0_0_12px_rgba(255,183,0,0.3)]'
+                    ? 'bg-slate-900/60 border-amber-500/50'
                     : d.estado_en_linea
-                        ? 'bg-slate-950 border-cyan-500/30 shadow-[0_0_10px_rgba(0,240,255,0.08)]'
-                        : 'bg-slate-950 border-slate-800 opacity-60'
+                        ? 'bg-slate-900/60 border-slate-800'
+                        : 'bg-slate-900/40 border-slate-800 opacity-60'
         }`;
 
         gridCard.innerHTML = `
@@ -1262,7 +1289,7 @@ function renderVistaEmpresarialGrid(dispositivos) {
                 </div>
                 <div class="my-2">
                     <span class="text-[9px] text-slate-400 block uppercase">Software Activo:</span>
-                    <p class="text-[11px] font-bold ${tieneInfraccion ? 'text-cyberPink font-black' : 'text-yellow-400'} truncate" title="${d.ventana_activa}">
+                    <p class="text-[11px] font-bold ${tieneInfraccion ? 'text-cyberPink font-black' : 'text-amber-400'} truncate" title="${d.ventana_activa}">
                         ${tieneInfraccion ? '🚨 ' : '👀 '}${d.ventana_activa || 'Escritorio / IDLE'}
                     </p>
                 </div>
@@ -1271,9 +1298,9 @@ function renderVistaEmpresarialGrid(dispositivos) {
                     <span>RAM: <b class="text-white">${d.ram_uso}%</b></span>
                 </div>
             </div>
-            <div class="grid grid-cols-2 gap-1 pt-1.5 border-t border-slate-900">
-                <button onclick="disparar('${d.dispositivo_id}','CONGELAR_PANTALLA')" class="bg-yellow-950/50 text-yellow-300 border border-yellow-800/40 rounded py-1 text-[9px] font-bold hover:bg-yellow-900/60">CONGELAR</button>
-                <button onclick="disparar('${d.dispositivo_id}','DESCONGELAR')" class="bg-cyan-950/50 text-cyberCyan border border-cyan-800/40 rounded py-1 text-[9px] font-bold hover:bg-cyan-900/60">LIBERAR</button>
+            <div class="grid grid-cols-2 gap-1 pt-1.5 border-t border-slate-800">
+                <button onclick="disparar('${d.dispositivo_id}','CONGELAR_PANTALLA')" class="bg-amber-950/40 text-amber-300 border border-amber-800/40 rounded-lg py-1 text-[9px] font-bold hover:bg-amber-900/50">CONGELAR</button>
+                <button onclick="disparar('${d.dispositivo_id}','DESCONGELAR')" class="bg-cyan-950/40 text-cyberCyan border border-cyan-800/40 rounded-lg py-1 text-[9px] font-bold hover:bg-cyan-900/50">LIBERAR</button>
             </div>
         `;
         grid.appendChild(gridCard);
@@ -1285,11 +1312,11 @@ function renderMiembros(miembros) {
     cont.innerHTML = "";
     miembros.forEach(m => {
         const d = document.createElement('div');
-        d.className = "bg-black/60 border border-slate-800 rounded-lg p-3 flex flex-col justify-between hover:border-cyan-500/40 transition";
+        d.className = "bg-black/30 border border-slate-800 rounded-xl p-3 flex flex-col justify-between hover:border-slate-600 transition";
         d.innerHTML = `
             <div class="flex items-center justify-between">
                 <span class="text-xs font-black text-white">${m.nombre}</span>
-                <span class="text-[9px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyberCyan border border-cyan-800 font-bold">${m.rol}</span>
+                <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-800 text-cyberCyan border border-slate-700 font-bold">${m.rol}</span>
             </div>
             <div class="flex items-center justify-between text-[10px] text-slate-400 mt-2">
                 <span>Saldo Bonus: <b class="text-neonGreen">${m.minutos_saldo_recompensa || 0}m</b></span>
@@ -1306,14 +1333,14 @@ function renderTareas(tareas) {
     if (tareas.length === 0) { c.innerHTML = '<p class="text-[11px] text-slate-500 italic">No hay misiones asignadas.</p>'; return; }
     tareas.forEach(t => {
         const d = document.createElement('div');
-        d.className = "flex items-center justify-between p-2 rounded bg-black/60 border border-slate-800 text-[11px]";
+        d.className = "flex items-center justify-between p-2 rounded-xl bg-black/30 border border-slate-800 text-[11px]";
         d.innerHTML = `
             <div>
                 <span class="font-bold text-white">${t.descripcion}</span>
                 <span class="text-[10px] text-neonGreen block">+${t.minutos_recompensa} min libre</span>
             </div>
             <div>
-                ${t.estado === 'PENDIENTE' ? `<button onclick="aprobarTarea('${t.tarea_id}')" class="tactical-btn px-2.5 py-1 rounded text-[10px] font-bold text-neonGreen border-green-500/40">APROBAR</button>` : '<span class="text-[9px] text-slate-500 uppercase font-bold">COMPLETADA</span>'}
+                ${t.estado === 'PENDIENTE' ? `<button onclick="aprobarTarea('${t.tarea_id}')" class="tactical-btn px-2.5 py-1 rounded-lg text-[10px] font-bold text-neonGreen border-green-500/30">APROBAR</button>` : '<span class="text-[9px] text-slate-500 uppercase font-bold">COMPLETADA</span>'}
             </div>
         `;
         c.appendChild(d);
@@ -1326,12 +1353,12 @@ function renderRestricciones(restricciones) {
     if (restricciones.length === 0) { c.innerHTML = '<p class="text-[11px] text-slate-500 italic">Sin dominios bloqueados.</p>'; return; }
     restricciones.forEach(r => {
         const d = document.createElement('div');
-        d.className = "flex items-center justify-between p-2 rounded bg-black/50 border border-slate-800 text-[11px]";
+        d.className = "flex items-center justify-between p-2 rounded-xl bg-black/20 border border-slate-800 text-[11px]";
         d.innerHTML = `
             <div class="flex items-center space-x-2">
                 <i data-lucide="slash" class="w-3.5 h-3.5 text-cyberPink"></i>
                 <span class="font-bold text-slate-200">${r.dominio}</span>
-                <span class="text-[9px] px-1.5 py-0.5 rounded bg-pink-950 text-cyberPink">${r.tipo_bloqueo}</span>
+                <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-rose-950/60 text-cyberPink">${r.tipo_bloqueo}</span>
             </div>
             <button onclick="eliminarRestriccion('${r.id}')" class="text-slate-400 hover:text-cyberCyan"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
         `;
@@ -1473,7 +1500,7 @@ function cerrarSesion() {
     document.getElementById('portal-login').classList.remove('hidden');
 }
 
-window.addEventListener('DOMContentLoaded', () => { initMap(); initSocket(); verificarSesionActiva(); });
+window.addEventListener('DOMContentLoaded', () => { initMap(); initSocket(); verificarSesionActiva(); cambiarPestana('familiar'); });
 """
 
 @app.get("/app.js")
@@ -1491,7 +1518,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     <title>AEGIS OS v12 // DUAL HOGAR & COLEGIO</title>
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
-    <meta name="theme-color" content="#010409">
+    <meta name="theme-color" content="#0f172a">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -1502,7 +1529,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             darkMode: 'class',
             theme: {
                 extend: {
-                    colors: { bunker: '#010409', cyberCyan: '#00f0ff', cyberPink: '#ff0055', neonGreen: '#00ff66', tacticalAmber: '#ffb700' },
+                    colors: { bunker: '#0f172a', cyberCyan: '#22d3ee', cyberPink: '#fb7185', neonGreen: '#34d399', tacticalAmber: '#f59e0b' },
                     fontFamily: { mono: ['JetBrains Mono', 'Menlo', 'monospace'] }
                 }
             }
@@ -1510,28 +1537,27 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     </script>
     <style>
         body {
-            background-color: #010409;
-            background-image: radial-gradient(rgba(0,240,255,0.07) 1px, transparent 0), radial-gradient(rgba(255,0,85,0.04) 1px, transparent 0);
-            background-position: 0 0, 25px 25px;
-            background-size: 50px 50px;
+            background: linear-gradient(to bottom right, #020617, #0f172a, #0b1220);
+            min-height: 100vh;
         }
-        .glass-panel { background: rgba(7, 13, 24, 0.88); backdrop-filter: blur(16px); border: 1px solid rgba(0, 240, 255, 0.22); }
-        .tactical-btn { background: rgba(13, 22, 38, 0.75); border: 1px solid rgba(0, 240, 255, 0.35); transition: all 0.2s ease; }
-        .tactical-btn:hover { background: rgba(0, 240, 255, 0.2); border-color: #00f0ff; box-shadow: 0 0 15px rgba(0,240,255,0.4); transform: translateY(-1px); }
-        .danger-btn { background: rgba(35, 10, 22, 0.75); border: 1px solid rgba(255, 0, 85, 0.45); }
-        .danger-btn:hover { background: rgba(255, 0, 85, 0.3); border-color: #ff0055; box-shadow: 0 0 18px rgba(255,0,85,0.6); }
-        .amber-btn { background: rgba(35, 25, 10, 0.75); border: 1px solid rgba(255, 183, 0, 0.45); }
-        .amber-btn:hover { background: rgba(255, 183, 0, 0.3); border-color: #ffb700; box-shadow: 0 0 18px rgba(255,183,0,0.6); }
-        @keyframes pulse-neon { 0%, 100% { opacity: 1; filter: drop-shadow(0 0 8px #ff0055); } 50% { opacity: 0.3; filter: drop-shadow(0 0 2px #ff0055); } }
-        .alert-critical { animation: pulse-neon 1s infinite; }
+        .glass-panel { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(18px); border: 1px solid rgba(51, 65, 85, 0.6); }
+        .tactical-btn { background: rgba(30, 41, 59, 0.55); border: 1px solid rgba(71, 85, 105, 0.6); transition: all 0.2s ease; }
+        .tactical-btn:hover { background: rgba(51, 65, 85, 0.7); border-color: rgba(148, 163, 184, 0.6); box-shadow: 0 4px 18px rgba(0,0,0,0.35); transform: translateY(-1px); }
+        .danger-btn { background: rgba(76, 15, 30, 0.35); border: 1px solid rgba(251, 113, 133, 0.35); }
+        .danger-btn:hover { background: rgba(251, 113, 133, 0.2); border-color: rgba(251, 113, 133, 0.6); }
+        .amber-btn { background: rgba(69, 41, 6, 0.35); border: 1px solid rgba(245, 158, 11, 0.35); }
+        .amber-btn:hover { background: rgba(245, 158, 11, 0.2); border-color: rgba(245, 158, 11, 0.6); }
+        @keyframes pulse-neon { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .alert-critical { animation: pulse-neon 1.4s infinite; }
+        .tab-btn { border-bottom: 2px solid transparent; }
     </style>
 </head>
 <body class="text-slate-200 font-mono min-h-screen w-screen overflow-x-hidden flex flex-col m-0 p-0">
 
     <!-- PORTAL DE LOGIN TÁCTICO -->
-    <div id="portal-login" class="fixed inset-0 bg-black/95 backdrop-blur-2xl z-50 flex items-center justify-center p-4">
-        <div class="glass-panel rounded-2xl max-w-md w-full p-8 border border-cyan-500/50 space-y-6 text-center shadow-[0_0_50px_rgba(0,240,255,0.2)]">
-            <div class="p-3 border border-cyan-500/40 rounded-full bg-cyan-500/10 text-cyberCyan w-16 h-16 mx-auto flex items-center justify-center shadow-[0_0_15px_#00f0ff]">
+    <div id="portal-login" class="fixed inset-0 bg-slate-950/90 backdrop-blur-xl z-50 flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl max-w-md w-full p-8 border border-slate-700/60 space-y-6 text-center shadow-2xl">
+            <div class="p-3 border border-slate-700 rounded-full bg-slate-800/60 text-cyberCyan w-16 h-16 mx-auto flex items-center justify-center">
                 <i data-lucide="shield-check" class="w-8 h-8"></i>
             </div>
             <div>
@@ -1540,58 +1566,72 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             </div>
             <form onsubmit="autenticarTutor(event)" class="space-y-4">
                 <input type="password" id="input-master-token" placeholder="••••••••••••••••" required autofocus
-                       class="w-full bg-black/70 border border-cyan-500/40 rounded-lg px-4 py-3 text-center text-sm text-cyberCyan tracking-widest focus:outline-none focus:border-cyan-400">
+                       class="w-full bg-slate-900/70 border border-slate-700 rounded-xl px-4 py-3 text-center text-sm text-cyberCyan tracking-widest focus:outline-none focus:border-slate-500">
                 <p id="login-error" class="text-xs text-cyberPink hidden font-bold">⚠️ Clave Maestra Incorrecta.</p>
-                <button type="submit" class="w-full tactical-btn py-3 rounded-lg text-xs text-cyberCyan font-bold uppercase tracking-wider">
+                <button type="submit" class="w-full tactical-btn py-3 rounded-xl text-xs text-cyberCyan font-bold uppercase tracking-wider">
                     INGRESAR A LA PLATAFORMA
                 </button>
             </form>
-            <p class="text-[10px] text-slate-500">Clave de acceso: <span class="text-slate-300">AEGIS-PADRE-SEGURA-2026</span></p>
         </div>
     </div>
 
     <!-- HEADER MILITAR TÁCTICO -->
-    <header class="w-full border-b border-cyan-500/30 bg-black/90 px-6 py-3.5 flex flex-wrap items-center justify-between backdrop-blur-md sticky top-0 z-40">
-        <div class="flex items-center space-x-4">
-            <div class="p-2 border border-cyan-500/50 rounded bg-cyan-500/15 text-cyberCyan shadow-[0_0_12px_rgba(0,240,255,0.3)]">
-                <i data-lucide="shield-alert" class="w-7 h-7"></i>
-            </div>
-            <div>
-                <div class="flex items-center space-x-2">
-                    <span class="text-xl font-black tracking-widest text-white">AEGIS OS</span>
-                    <span id="txt-plan-badge" class="text-xs px-2 py-0.5 rounded bg-cyan-500/20 text-cyberCyan border border-cyan-500/40 font-bold">HOGAR // PLAN PREMIUM</span>
-                    <span class="text-xs px-2 py-0.5 rounded bg-pink-500/20 text-cyberPink border border-pink-500/40 font-bold">PERÚ</span>
+    <header class="w-full border-b border-slate-800 bg-slate-950/80 px-6 py-3.5 backdrop-blur-md sticky top-0 z-40 space-y-3">
+        <div class="flex flex-wrap items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <div class="p-2 border border-slate-700 rounded-xl bg-slate-800/60 text-cyberCyan">
+                    <i data-lucide="shield-alert" class="w-7 h-7"></i>
                 </div>
-                <p class="text-[11px] text-slate-400">NÚCLEO: <b class="text-white" id="txt-familia">Cargando...</b></p>
+                <div>
+                    <div class="flex items-center space-x-2">
+                        <span class="text-xl font-black tracking-widest text-white">AEGIS OS</span>
+                        <span id="txt-plan-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-cyberCyan border border-slate-700 font-bold">HOGAR // PLAN PREMIUM</span>
+                        <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-cyberPink border border-slate-700 font-bold">PERÚ</span>
+                    </div>
+                    <p class="text-[11px] text-slate-400">NÚCLEO: <b class="text-white" id="txt-familia">Cargando...</b></p>
+                </div>
+            </div>
+
+            <div class="flex items-center space-x-3 text-xs mt-2 md:mt-0">
+                <button onclick="cambiarEntornoLaboratorio()" title="Alternar entre Familia y Laboratorio Escolar" class="tactical-btn text-slate-300 font-bold px-3 py-1.5 rounded-xl flex items-center space-x-2">
+                    <i data-lucide="repeat" class="w-4 h-4"></i>
+                    <span>CAMBIAR ENTORNO</span>
+                </button>
+                <button onclick="document.getElementById('modal-planes').classList.remove('hidden')" class="tactical-btn amber-btn text-amber-400 font-bold px-3 py-1.5 rounded-xl flex items-center space-x-2">
+                    <i data-lucide="sparkles" class="w-4 h-4"></i><span>PLANES Y CUPONES</span>
+                </button>
+                <button onclick="abrirModalPin()" class="tactical-btn text-cyberCyan font-bold px-3 py-1.5 rounded-xl flex items-center space-x-2">
+                    <i data-lucide="key" class="w-4 h-4"></i><span>VINCULAR EQUIPO (OTP)</span>
+                </button>
+                <a href="/agente/descargar/AegisAgent.java" download class="tactical-btn text-neonGreen font-bold px-3 py-1.5 rounded-xl flex items-center space-x-2">
+                    <i data-lucide="download" class="w-4 h-4"></i><span>BAJAR AGENTE JAVA</span>
+                </a>
+                <div class="bg-slate-900/70 border border-slate-800 px-3 py-1.5 rounded-xl flex items-center space-x-2">
+                    <i data-lucide="credit-card" class="w-4 h-4 text-amber-400"></i>
+                    <span>LICENCIA: <b class="text-amber-400" id="txt-licencia">-- DÍAS</b></span>
+                </div>
+                <button onclick="cerrarSesion()" class="tactical-btn text-slate-400 p-1.5 rounded-xl hover:text-white"><i data-lucide="log-out" class="w-4 h-4"></i></button>
             </div>
         </div>
 
-        <div class="flex items-center space-x-3 text-xs mt-2 md:mt-0">
-            <button onclick="cambiarEntornoLaboratorio()" title="Alternar entre Familia y Laboratorio Escolar" class="tactical-btn text-cyan-300 font-bold px-3 py-1.5 rounded flex items-center space-x-2 border-cyan-500/40">
-                <i data-lucide="repeat" class="w-4 h-4"></i>
-                <span>CAMBIAR ENTORNO</span>
+        <!-- BARRA DE PESTAÑAS -->
+        <nav class="flex items-center space-x-1">
+            <button id="tab-btn-familiar" onclick="cambiarPestana('familiar')" class="tab-btn bg-slate-800 text-white border-slate-600 px-4 py-2 rounded-t-xl text-xs font-bold uppercase tracking-wide flex items-center space-x-2 transition">
+                <span>🏠</span><span>Búnker Familiar</span>
             </button>
-            <button onclick="document.getElementById('modal-planes').classList.remove('hidden')" class="tactical-btn text-yellow-400 font-bold px-3 py-1.5 rounded flex items-center space-x-2 border-yellow-500/40">
-                <i data-lucide="sparkles" class="w-4 h-4"></i><span>PLANES Y CUPONES</span>
+            <button id="tab-btn-aula" onclick="cambiarPestana('aula')" class="tab-btn text-slate-400 border-transparent px-4 py-2 rounded-t-xl text-xs font-bold uppercase tracking-wide flex items-center space-x-2 transition">
+                <span>🏫</span><span>Control de Aula</span>
             </button>
-            <button onclick="abrirModalPin()" class="tactical-btn text-cyberCyan font-bold px-3 py-1.5 rounded flex items-center space-x-2">
-                <i data-lucide="key" class="w-4 h-4"></i><span>VINCULAR EQUIPO (OTP)</span>
+            <button id="tab-btn-inteligencia" onclick="cambiarPestana('inteligencia')" class="tab-btn text-slate-400 border-transparent px-4 py-2 rounded-t-xl text-xs font-bold uppercase tracking-wide flex items-center space-x-2 transition">
+                <span>📊</span><span>Inteligencia y Misiones</span>
             </button>
-            <a href="/agente/descargar/AegisAgent.java" download class="tactical-btn text-neonGreen font-bold px-3 py-1.5 rounded flex items-center space-x-2 border-green-500/40">
-                <i data-lucide="download" class="w-4 h-4"></i><span>BAJAR AGENTE JAVA</span>
-            </a>
-            <div class="bg-slate-900 border border-slate-700 px-3 py-1.5 rounded flex items-center space-x-2">
-                <i data-lucide="credit-card" class="w-4 h-4 text-yellow-400"></i>
-                <span>LICENCIA: <b class="text-yellow-400" id="txt-licencia">-- DÍAS</b></span>
-            </div>
-            <button onclick="cerrarSesion()" class="tactical-btn text-slate-400 p-1.5 rounded hover:text-white"><i data-lucide="log-out" class="w-4 h-4"></i></button>
-        </div>
+        </nav>
     </header>
 
     <main class="w-full flex-1 p-6 space-y-6">
 
-        <!-- NÚCLEO PROTEGIDO -->
-        <section class="glass-panel rounded-xl p-4 border border-cyan-500/30 space-y-3">
+        <!-- NÚCLEO PROTEGIDO (visible siempre) -->
+        <section class="glass-panel rounded-2xl p-4 border border-slate-800 space-y-3">
             <div class="flex items-center space-x-2 text-cyberCyan">
                 <i data-lucide="users" class="w-5 h-5"></i>
                 <span class="text-xs font-black uppercase tracking-wider text-slate-200">Integrantes / Alumnos Registrados:</span>
@@ -1599,80 +1639,117 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             <div id="contenedor-miembros" class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3"></div>
         </section>
 
-        <!-- ACCIONES MASIVAS -->
-        <section class="glass-panel rounded-xl p-4 flex flex-wrap items-center justify-between gap-4 border border-cyan-500/30">
-            <div class="flex items-center space-x-3">
-                <i data-lucide="zap" class="text-cyberCyan w-5 h-5"></i>
-                <span class="text-sm font-bold uppercase tracking-wider text-slate-200">Control de Red Simultáneo:</span>
-            </div>
-            <div class="flex flex-wrap gap-2">
-                <button onclick="ejecutarAccionMasiva('CONGELAR_PANTALLA')" class="tactical-btn px-3.5 py-2 rounded text-xs text-yellow-300 font-bold flex items-center space-x-2 border-yellow-500/40">
-                    <i data-lucide="eye" class="w-4 h-4"></i><span>CONGELAR AULA (ATENCIÓN)</span>
-                </button>
-                <button onclick="ejecutarAccionMasiva('DESCONGELAR')" class="tactical-btn px-3.5 py-2 rounded text-xs text-neonGreen font-bold flex items-center space-x-2 border-green-500/40">
-                    <i data-lucide="unlock" class="w-4 h-4"></i><span>LIBERAR AULA</span>
-                </button>
-                <button onclick="ejecutarAccionMasiva('BLOQUEAR_SISTEMA')" class="tactical-btn px-3.5 py-2 rounded text-xs text-yellow-400 font-bold flex items-center space-x-2">
-                    <i data-lucide="shield-ban" class="w-4 h-4"></i><span>BLOQUEO TOTAL</span>
-                </button>
-                <button onclick="ejecutarAccionMasiva('REINICIAR')" class="tactical-btn px-3.5 py-2 rounded text-xs text-cyan-300 font-bold flex items-center space-x-2">
-                    <i data-lucide="rotate-ccw" class="w-4 h-4"></i><span>REINICIAR</span>
-                </button>
-                <button onclick="ejecutarAccionMasiva('APAGAR')" class="tactical-btn danger-btn px-3.5 py-2 rounded text-xs text-cyberPink font-bold flex items-center space-x-2">
-                    <i data-lucide="power" class="w-4 h-4"></i><span>APAGADO GENERAL</span>
-                </button>
-            </div>
-        </section>
-
-        <div class="w-full grid grid-cols-1 xl:grid-cols-3 gap-6">
-            <div class="xl:col-span-2 space-y-4">
-                <div class="flex items-center justify-between">
-                    <h2 class="text-sm font-extrabold uppercase tracking-wider text-cyan-400 flex items-center space-x-2">
-                        <i data-lucide="cpu" class="w-4 h-4"></i><span>PANEL DE TERMINALES EN TIEMPO REAL</span>
-                    </h2>
-                    <span class="text-xs text-slate-400" id="txt-total-devs">Cargando...</span>
-                </div>
-                
-                <!-- GRID DINÁMICO (Cambia a Matriz de Aula en modo EMPRESA) -->
-                <div id="grid-dispositivos"></div>
-
-                <!-- MÓDULO DE TAREAS Y RECOMPENSAS -->
-                <div class="glass-panel rounded-xl p-5 border border-neonGreen/30 space-y-4">
-                    <div class="flex items-center space-x-2 text-neonGreen">
-                        <i data-lucide="check-circle-2" class="w-5 h-5"></i>
-                        <h3 class="text-sm font-black uppercase tracking-wider">Misiones por Saldo de Pantalla (Gamificación)</h3>
+        <!-- ==================== PESTAÑA 1: BÚNKER FAMILIAR ==================== -->
+        <div id="tab-content-familiar" class="space-y-6">
+            <div class="w-full grid grid-cols-1 xl:grid-cols-3 gap-6">
+                <div class="xl:col-span-2 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-sm font-extrabold uppercase tracking-wider text-slate-300 flex items-center space-x-2">
+                            <i data-lucide="cpu" class="w-4 h-4"></i><span>PANEL DE TERMINALES EN TIEMPO REAL</span>
+                        </h2>
+                        <span class="text-xs text-slate-400" id="txt-total-devs">Cargando...</span>
                     </div>
-                    <form onsubmit="crearTarea(event)" class="grid grid-cols-1 md:grid-cols-4 gap-2">
-                        <select id="sel-miembro-tarea" class="bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs text-white"></select>
-                        <input type="text" id="in-desc-tarea" placeholder="Misión (ej. Repasar álgebra)" required class="md:col-span-2 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs text-white">
-                        <div class="flex space-x-1">
-                            <input type="number" id="in-min-tarea" value="60" min="15" max="300" class="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-2 text-xs text-white">
-                            <button type="submit" class="flex-1 tactical-btn text-neonGreen font-bold py-2 rounded text-xs uppercase">ASIGNAR</button>
-                        </div>
-                    </form>
-                    <div id="contenedor-tareas" class="space-y-2 max-h-[140px] overflow-y-auto"></div>
+                    <div id="grid-dispositivos"></div>
                 </div>
-            </div>
 
-            <div class="space-y-6">
-                <!-- CONTENEDOR DEL RADAR SATELITAL (Se oculta automáticamente en modo EMPRESA) -->
-                <div id="panel-radar-satelital" class="glass-panel rounded-xl p-4 flex flex-col h-[320px]">
+                <div class="glass-panel rounded-2xl p-4 flex flex-col h-[420px] xl:h-auto">
                     <div class="flex items-center justify-between mb-2">
                         <h3 class="text-xs font-bold text-slate-200 uppercase flex items-center space-x-2">
                             <i data-lucide="map-pin" class="w-4 h-4 text-cyberPink"></i><span>Radar de Ubicación Global</span>
                         </h3>
-                        <span class="text-[10px] text-cyberCyan px-2 py-0.5 rounded bg-cyan-950 border border-cyan-800 font-bold">PERÚ & EXTERIOR</span>
+                        <span class="text-[10px] text-cyberCyan px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 font-bold">PERÚ & EXTERIOR</span>
                     </div>
-                    <div id="map-radar" class="w-full flex-1 rounded border border-slate-800 z-10"></div>
+                    <div id="map-radar" class="w-full flex-1 rounded-xl border border-slate-800 z-10"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== PESTAÑA 2: CONTROL DE AULA ==================== -->
+        <div id="tab-content-aula" class="space-y-6 hidden">
+            <section class="glass-panel rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4 border border-slate-800">
+                <div class="flex items-center space-x-3">
+                    <i data-lucide="zap" class="text-cyberCyan w-5 h-5"></i>
+                    <span class="text-sm font-bold uppercase tracking-wider text-slate-200">Control de Red Simultáneo:</span>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <button onclick="ejecutarAccionMasiva('CONGELAR_PANTALLA')" class="tactical-btn amber-btn px-3.5 py-2 rounded-xl text-xs text-amber-300 font-bold flex items-center space-x-2">
+                        <i data-lucide="eye" class="w-4 h-4"></i><span>CONGELAR AULA (ATENCIÓN)</span>
+                    </button>
+                    <button onclick="ejecutarAccionMasiva('DESCONGELAR')" class="tactical-btn px-3.5 py-2 rounded-xl text-xs text-neonGreen font-bold flex items-center space-x-2">
+                        <i data-lucide="unlock" class="w-4 h-4"></i><span>LIBERAR AULA</span>
+                    </button>
+                    <button onclick="ejecutarAccionMasiva('BLOQUEAR_SISTEMA')" class="tactical-btn amber-btn px-3.5 py-2 rounded-xl text-xs text-amber-400 font-bold flex items-center space-x-2">
+                        <i data-lucide="shield-ban" class="w-4 h-4"></i><span>BLOQUEO TOTAL</span>
+                    </button>
+                    <button onclick="ejecutarAccionMasiva('REINICIAR')" class="tactical-btn px-3.5 py-2 rounded-xl text-xs text-cyan-300 font-bold flex items-center space-x-2">
+                        <i data-lucide="rotate-ccw" class="w-4 h-4"></i><span>REINICIAR</span>
+                    </button>
+                    <button onclick="ejecutarAccionMasiva('APAGAR')" class="tactical-btn danger-btn px-3.5 py-2 rounded-xl text-xs text-cyberPink font-bold flex items-center space-x-2">
+                        <i data-lucide="power" class="w-4 h-4"></i><span>APAGADO GENERAL</span>
+                    </button>
+                </div>
+            </section>
+
+            <div class="w-full grid grid-cols-1 xl:grid-cols-3 gap-6">
+                <div class="xl:col-span-2 space-y-4">
+                    <h2 class="text-sm font-extrabold uppercase tracking-wider text-slate-300 flex items-center space-x-2">
+                        <i data-lucide="layout-grid" class="w-4 h-4"></i><span>MATRIZ DE AULA / LABORATORIO</span>
+                    </h2>
+                    <p class="text-[11px] text-slate-500">La matriz se muestra automáticamente al cambiar a un entorno de tipo Empresa/Colegio.</p>
                 </div>
 
-                <!-- PANEL DE PRODUCTIVIDAD CORPORATIVA (CHART.JS) -->
-                <div class="glass-panel rounded-xl p-5 border border-cyan-500/30 space-y-4">
+                <div class="space-y-6">
+                    <div class="glass-panel rounded-2xl p-4 space-y-3">
+                        <h4 class="text-xs font-bold text-slate-300 uppercase flex items-center space-x-2">
+                            <i data-lucide="list-filter" class="w-4 h-4 text-cyberCyan"></i><span>Políticas Web Vigentes</span>
+                        </h4>
+                        <div id="lista-restricciones" class="space-y-2 max-h-[160px] overflow-y-auto"></div>
+                    </div>
+
+                    <div class="glass-panel rounded-2xl p-5 border border-slate-800 space-y-4">
+                        <div class="flex items-center space-x-2 text-cyberPink">
+                            <i data-lucide="lock" class="w-5 h-5"></i><h3 class="text-sm font-black uppercase tracking-wider">Castigo Web Inmediato</h3>
+                        </div>
+                        <form onsubmit="bloquearWeb(event)" class="space-y-3">
+                            <div>
+                                <label class="text-[10px] text-slate-400 uppercase">Terminal Objetivo:</label>
+                                <select id="sel-dev" class="w-full bg-slate-900/70 border border-slate-800 rounded-xl px-3 py-2 text-xs text-cyan-300"></select>
+                            </div>
+                            <div>
+                                <label class="text-[10px] text-slate-400 uppercase">Dominio (TikTok, Redes, Juegos):</label>
+                                <input type="text" id="in-dom" placeholder="ej: tiktok.com, roblox.com" required class="w-full bg-slate-900/70 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white">
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label class="text-[10px] text-slate-400 uppercase">Tipo:</label>
+                                    <select id="sel-tipo" class="w-full bg-slate-900/70 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white">
+                                        <option value="TEMPORAL">TEMPORAL</option>
+                                        <option value="PERMANENTE">PERMANENTE</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-slate-400 uppercase">Minutos:</label>
+                                    <input type="number" id="in-min" value="120" min="5" class="w-full bg-slate-900/70 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white">
+                                </div>
+                            </div>
+                            <button type="submit" class="w-full tactical-btn danger-btn text-cyberPink font-black py-2 rounded-xl text-xs flex items-center justify-center space-x-2">
+                                <i data-lucide="shield-x" class="w-4 h-4"></i><span>BLOQUEAR DOMINIO WEB</span>
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== PESTAÑA 3: INTELIGENCIA Y MISIONES ==================== -->
+        <div id="tab-content-inteligencia" class="space-y-6 hidden">
+            <div class="w-full grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <div class="glass-panel rounded-2xl p-5 border border-slate-800 space-y-4">
                     <div class="flex items-center space-x-2 text-cyberCyan">
                         <i data-lucide="bar-chart-3" class="w-5 h-5"></i>
                         <h3 class="text-sm font-black uppercase tracking-wider">Índice de Productividad del Aula</h3>
                     </div>
-                    <div class="relative w-full h-44 flex items-center justify-center">
+                    <div class="relative w-full h-56 flex items-center justify-center">
                         <canvas id="chart-productividad"></canvas>
                     </div>
                     <div class="text-center text-xs">
@@ -1680,66 +1757,41 @@ HTML_DASHBOARD = """<!DOCTYPE html>
                     </div>
                 </div>
 
-                <!-- POLÍTICAS ACTIVAS -->
-                <div class="glass-panel rounded-xl p-4 space-y-3">
-                    <h4 class="text-xs font-bold text-slate-300 uppercase flex items-center space-x-2">
-                        <i data-lucide="list-filter" class="w-4 h-4 text-cyberCyan"></i><span>Políticas Web Vigentes</span>
-                    </h4>
-                    <div id="lista-restricciones" class="space-y-2 max-h-[160px] overflow-y-auto"></div>
-                </div>
-
-                <!-- CASTIGO WEB -->
-                <div class="glass-panel rounded-xl p-5 border border-pink-500/30 space-y-4">
-                    <div class="flex items-center space-x-2 text-cyberPink">
-                        <i data-lucide="lock" class="w-5 h-5"></i><h3 class="text-sm font-black uppercase tracking-wider">Castigo Web Inmediato</h3>
+                <div class="glass-panel rounded-2xl p-5 border border-slate-800 space-y-4">
+                    <div class="flex items-center space-x-2 text-neonGreen">
+                        <i data-lucide="check-circle-2" class="w-5 h-5"></i>
+                        <h3 class="text-sm font-black uppercase tracking-wider">Misiones por Saldo de Pantalla (Gamificación)</h3>
                     </div>
-                    <form onsubmit="bloquearWeb(event)" class="space-y-3">
-                        <div>
-                            <label class="text-[10px] text-slate-400 uppercase">Terminal Objetivo:</label>
-                            <select id="sel-dev" class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs text-cyan-300"></select>
+                    <form onsubmit="crearTarea(event)" class="grid grid-cols-1 gap-2">
+                        <select id="sel-miembro-tarea" class="bg-slate-900/70 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white"></select>
+                        <input type="text" id="in-desc-tarea" placeholder="Misión (ej. Repasar álgebra)" required class="bg-slate-900/70 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white">
+                        <div class="flex space-x-1">
+                            <input type="number" id="in-min-tarea" value="60" min="15" max="300" class="w-24 bg-slate-900/70 border border-slate-800 rounded-xl px-2 py-2 text-xs text-white">
+                            <button type="submit" class="flex-1 tactical-btn text-neonGreen font-bold py-2 rounded-xl text-xs uppercase">ASIGNAR</button>
                         </div>
-                        <div>
-                            <label class="text-[10px] text-slate-400 uppercase">Dominio (TikTok, Redes, Juegos):</label>
-                            <input type="text" id="in-dom" placeholder="ej: tiktok.com, roblox.com" required class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs text-white">
-                        </div>
-                        <div class="grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="text-[10px] text-slate-400 uppercase">Tipo:</label>
-                                <select id="sel-tipo" class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs text-white">
-                                    <option value="TEMPORAL">TEMPORAL</option>
-                                    <option value="PERMANENTE">PERMANENTE</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label class="text-[10px] text-slate-400 uppercase">Minutos:</label>
-                                <input type="number" id="in-min" value="120" min="5" class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs text-white">
-                            </div>
-                        </div>
-                        <button type="submit" class="w-full tactical-btn danger-btn text-cyberPink font-black py-2 rounded text-xs flex items-center justify-center space-x-2">
-                            <i data-lucide="shield-x" class="w-4 h-4"></i><span>BLOQUEAR DOMINIO WEB</span>
-                        </button>
                     </form>
+                    <div id="contenedor-tareas" class="space-y-2 max-h-[220px] overflow-y-auto"></div>
                 </div>
             </div>
         </div>
     </main>
 
     <!-- MODAL OTP PIN -->
-    <div id="modal-otp" class="fixed inset-0 bg-black/85 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
-        <div class="glass-panel rounded-2xl max-w-md w-full p-6 border border-yellow-500/50 space-y-5 text-center">
-            <h3 class="font-black text-sm tracking-widest text-yellow-400 uppercase">PIN TEMPORAL DE VINCULACIÓN</h3>
+    <div id="modal-otp" class="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl max-w-md w-full p-6 border border-amber-500/40 space-y-5 text-center">
+            <h3 class="font-black text-sm tracking-widest text-amber-400 uppercase">PIN TEMPORAL DE VINCULACIÓN</h3>
             <p class="text-xs text-slate-300">Introduce este código en el agente Java para enlazar la computadora:</p>
-            <div class="bg-black/60 p-4 rounded-xl border border-yellow-500/40">
-                <span class="text-4xl font-black text-yellow-400 tracking-widest font-mono" id="pin-display">--- ---</span>
+            <div class="bg-black/30 p-4 rounded-2xl border border-amber-500/30">
+                <span class="text-4xl font-black text-amber-400 tracking-widest font-mono" id="pin-display">--- ---</span>
                 <p class="text-[10px] text-slate-400 mt-2">Válido por 10 minutos (Un solo uso)</p>
             </div>
-            <button onclick="document.getElementById('modal-otp').classList.add('hidden')" class="w-full tactical-btn py-2.5 rounded text-xs text-white uppercase font-bold">Cerrar</button>
+            <button onclick="document.getElementById('modal-otp').classList.add('hidden')" class="w-full tactical-btn py-2.5 rounded-xl text-xs text-white uppercase font-bold">Cerrar</button>
         </div>
     </div>
 
     <!-- MODAL PLANES SAAS -->
-    <div id="modal-planes" class="fixed inset-0 bg-black/90 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
-        <div class="glass-panel rounded-2xl max-w-3xl w-full p-6 border border-cyan-500/50 space-y-6">
+    <div id="modal-planes" class="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl max-w-3xl w-full p-6 border border-slate-700/60 space-y-6">
             <div class="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div class="flex items-center space-x-3 text-cyberCyan">
                     <i data-lucide="sparkles" class="w-6 h-6"></i>
@@ -1748,63 +1800,63 @@ HTML_DASHBOARD = """<!DOCTYPE html>
                 <button onclick="document.getElementById('modal-planes').classList.add('hidden')" class="text-slate-400 hover:text-white">&times;</button>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
-                <div class="bg-black/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between hover:border-cyan-500/50 transition">
+                <div class="bg-black/20 border border-slate-800 rounded-2xl p-4 flex flex-col justify-between hover:border-slate-600 transition">
                     <div>
                         <h4 class="font-bold text-white text-sm">Control Esencial</h4>
                         <p class="text-xs text-slate-400 mt-1">Hasta 2 dispositivos</p>
                         <p class="text-2xl font-black text-neonGreen my-3">S/ 19.90 <span class="text-[10px] text-slate-400 font-normal">/mes</span></p>
                     </div>
-                    <button onclick="seleccionarPlan('BASICO')" class="w-full tactical-btn py-2 rounded text-xs font-bold text-cyan-300">ELEGIR BÁSICO</button>
+                    <button onclick="seleccionarPlan('BASICO')" class="w-full tactical-btn py-2 rounded-xl text-xs font-bold text-cyan-300">ELEGIR BÁSICO</button>
                 </div>
-                <div class="bg-cyan-950/20 border-2 border-cyan-500 rounded-xl p-4 flex flex-col justify-between shadow-[0_0_20px_rgba(0,240,255,0.2)]">
+                <div class="bg-slate-800/40 border-2 border-slate-600 rounded-2xl p-4 flex flex-col justify-between shadow-xl">
                     <div>
-                        <span class="text-[9px] bg-cyan-500 text-black font-black px-2 py-0.5 rounded uppercase">Recomendado</span>
+                        <span class="text-[9px] bg-cyan-500 text-black font-black px-2 py-0.5 rounded-full uppercase">Recomendado</span>
                         <h4 class="font-bold text-white text-sm mt-1">Familiar Premium</h4>
                         <p class="text-xs text-slate-400 mt-1">Hasta 5 dispositivos</p>
                         <p class="text-2xl font-black text-neonGreen my-3">S/ 49.90 <span class="text-[10px] text-slate-400 font-normal">/mes</span></p>
                     </div>
-                    <button onclick="seleccionarPlan('PREMIUM')" class="w-full bg-cyan-500 hover:bg-cyan-400 text-black py-2 rounded text-xs font-black uppercase">ELEGIR PREMIUM</button>
+                    <button onclick="seleccionarPlan('PREMIUM')" class="w-full bg-cyan-500 hover:bg-cyan-400 text-black py-2 rounded-xl text-xs font-black uppercase">ELEGIR PREMIUM</button>
                 </div>
-                <div class="bg-black/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between hover:border-pink-500/50 transition">
+                <div class="bg-black/20 border border-slate-800 rounded-2xl p-4 flex flex-col justify-between hover:border-slate-600 transition">
                     <div>
                         <h4 class="font-bold text-white text-sm">Búnker / Laboratorio</h4>
                         <p class="text-xs text-slate-400 mt-1">Dispositivos ilimitados</p>
                         <p class="text-2xl font-black text-neonGreen my-3">S/ 89.90 <span class="text-[10px] text-slate-400 font-normal">/mes</span></p>
                     </div>
-                    <button onclick="seleccionarPlan('MILITAR')" class="w-full tactical-btn amber-btn py-2 rounded text-xs font-bold text-yellow-400">ELEGIR ILIMITADO</button>
+                    <button onclick="seleccionarPlan('MILITAR')" class="w-full tactical-btn amber-btn py-2 rounded-xl text-xs font-bold text-amber-400">ELEGIR ILIMITADO</button>
                 </div>
             </div>
         </div>
     </div>
 
     <!-- MODAL CHECKOUT CUPÓN -->
-    <div id="modal-checkout-cupon" class="fixed inset-0 bg-black/90 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
-        <div class="glass-panel rounded-2xl max-w-md w-full p-6 border border-yellow-500/50 space-y-5 text-center">
-            <h3 class="font-black text-sm tracking-wider text-yellow-400 uppercase">FINALIZAR SUSCRIPCIÓN</h3>
+    <div id="modal-checkout-cupon" class="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl max-w-md w-full p-6 border border-amber-500/40 space-y-5 text-center">
+            <h3 class="font-black text-sm tracking-wider text-amber-400 uppercase">FINALIZAR SUSCRIPCIÓN</h3>
             <p class="text-xs text-slate-300">Plan seleccionado: <b id="lbl-plan-nombre" class="text-white">---</b></p>
             <div class="space-y-2">
                 <input type="text" id="input-cupon" placeholder="Código de Cupón (ej: AEGISYAPE50)"
-                       class="w-full bg-black/70 border border-yellow-500/40 rounded-lg px-3 py-2 text-center text-xs text-yellow-400 uppercase tracking-widest focus:outline-none focus:border-yellow-400">
+                       class="w-full bg-slate-900/70 border border-amber-500/30 rounded-xl px-3 py-2 text-center text-xs text-amber-400 uppercase tracking-widest focus:outline-none focus:border-amber-400/60">
                 <p class="text-[10px] text-slate-400">¿Tienes cupón de descuento? Ingrésalo antes de pagar.</p>
             </div>
             <div class="flex space-x-2">
-                <button onclick="document.getElementById('modal-checkout-cupon').classList.add('hidden')" class="flex-1 tactical-btn py-2 rounded text-xs text-slate-400 font-bold">CANCELAR</button>
-                <button onclick="aplicarCuponYProceder()" class="flex-1 bg-sky-500 hover:bg-sky-400 text-black py-2 rounded text-xs font-black uppercase">PAGAR CON MERCADO PAGO</button>
+                <button onclick="document.getElementById('modal-checkout-cupon').classList.add('hidden')" class="flex-1 tactical-btn py-2 rounded-xl text-xs text-slate-400 font-bold">CANCELAR</button>
+                <button onclick="aplicarCuponYProceder()" class="flex-1 bg-sky-500 hover:bg-sky-400 text-black py-2 rounded-xl text-xs font-black uppercase">PAGAR CON MERCADO PAGO</button>
             </div>
         </div>
     </div>
 
     <!-- MODAL SUSPENSIÓN DE SERVICIO -->
-    <div id="modal-pago" class="fixed inset-0 bg-black/95 backdrop-blur-xl z-50 hidden flex items-center justify-center p-4">
-        <div class="glass-panel rounded-2xl max-w-md w-full p-6 border border-pink-500/60 space-y-5 text-center alert-critical">
-            <div class="p-3 border border-pink-500/50 rounded-full bg-pink-500/10 text-cyberPink w-14 h-14 mx-auto flex items-center justify-center">
+    <div id="modal-pago" class="fixed inset-0 bg-slate-950/95 backdrop-blur-xl z-50 hidden flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl max-w-md w-full p-6 border border-rose-500/40 space-y-5 text-center alert-critical">
+            <div class="p-3 border border-rose-500/40 rounded-full bg-rose-500/10 text-cyberPink w-14 h-14 mx-auto flex items-center justify-center">
                 <i data-lucide="shield-x" class="w-8 h-8"></i>
             </div>
             <div>
                 <h3 class="font-black text-base tracking-wider text-white uppercase">SERVICIO SUSPENDIDO</h3>
                 <p class="text-xs text-slate-300 mt-2">La suscripción ha vencido. Los terminales vinculados han sido suspendidos preventivamente.</p>
             </div>
-            <button onclick="document.getElementById('modal-planes').classList.remove('hidden')" class="w-full bg-sky-500 hover:bg-sky-400 text-black font-black py-3 rounded text-xs uppercase tracking-wider">
+            <button onclick="document.getElementById('modal-planes').classList.remove('hidden')" class="w-full bg-sky-500 hover:bg-sky-400 text-black font-black py-3 rounded-xl text-xs uppercase tracking-wider">
                 REGULARIZAR SUSCRIPCIÓN CON MERCADO PAGO
             </button>
         </div>
