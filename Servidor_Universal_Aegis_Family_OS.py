@@ -761,6 +761,9 @@ HTML_DASHBOARD = """
 """
 
 
+
+# 10. ARRANQUE DEL SERVIDOR ASGI (CORREGIDO PARA INTERNET / RENDER)
+# ==============================================================================
 # ==============================================================================
 # 10. ARRANQUE DEL SERVIDOR ASGI (CORREGIDO DE RAÍZ)
 # ==============================================================================
@@ -779,15 +782,34 @@ if __name__ == "__main__":
             objeto_app = obj
             break
             
+            # Buscamos de forma inteligente el objeto de FastAPI dentro de tu archivo
+    objeto_app = None
+    for atributo in dir(modulo_actual):
+        obj = getattr(modulo_actual, atributo)
+        if obj.__class__.__name__ == "FastAPI":
+            objeto_app = obj
+            break
+            
+    # ¡CORRECCIÓN!: Alineado al ras del 'for' (Mover a la izquierda)
     if objeto_app is None:
-        # Si Qwen la escondió dentro de una función, la forzamos a nacer aquí:
         from fastapi import FastAPI
         objeto_app = FastAPI()
 
+
+    # ==============================================================================
+    # ENLACE DE ENTRADA PRINCIPAL (SUBIDO ANTES DEL ARRANQUE DE UVICORN)
+    # ==============================================================================
+
+
+    # El arranque final de Uvicorn va siempre al último
     puerto_dinamico = int(os.getenv("PORT", 8000))
     print(f"[AEGIS-SAAS] Levantando servidor en el puerto: {puerto_dinamico}")
-    
-    # Ejecutamos el objeto real encontrado sin importar cómo se llame
     uvicorn.run(objeto_app, host="0.0.0.0", port=puerto_dinamico)
+    from fastapi.responses import HTMLResponse
+
+    @objeto_app.get("/", response_class=HTMLResponse)
+    async def cargar_interfaz_principal():
+        # Cargamos tu diseño de cristal clásico unificado
+        return HTMLResponse(content=HTML_DASHBOARD, status_code=200)
 
 
