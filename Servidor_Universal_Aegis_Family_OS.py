@@ -472,7 +472,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
     box-shadow:0 0 46px -4px rgba(34,211,238,1);
   }
 
-  #mapa{width:100%;height:100%;border-radius:20px;filter:hue-rotate(180deg) saturate(1.15) brightness(.85)}
+  #mapa{width:100%;height:100%;border-radius:20px;filter:saturate(1.25) contrast(1.08) brightness(.92)}
   .leaflet-container{background:#020617}
   .pin-neon{filter:drop-shadow(0 0 14px rgba(34,211,238,1)) drop-shadow(0 0 26px rgba(34,211,238,.6))}
 </style>
@@ -521,7 +521,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
     <button onclick="conversar()"
             class="btn-neon font-display font-black text-base md:text-lg tracking-[0.3em] uppercase text-cyan-100 px-14 py-5 rounded-3xl border border-cyan-400/70 mt-4"
             style="background:linear-gradient(150deg,rgba(34,211,238,.28),rgba(59,130,246,.12));">
-      ▶ CONVERSAR
+      ▶ CONECTAR NÚCLEO
     </button>
   </div>
 </div>
@@ -855,7 +855,11 @@ function inicializarMapa() {
   if (!el) return;
   mapaLeaflet = L.map("mapa", { zoomControl: true, attributionControl: false })
     .setView([-12.0464, -77.0428], 15);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(mapaLeaflet);
+  L.tileLayer("https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", {
+    maxZoom: 20,
+    subdomains: ["mt0", "mt1", "mt2", "mt3"],
+    attribution: "",
+  }).addTo(mapaLeaflet);
 }
 
 function actualizarMapa(lat, lng, nombre) {
@@ -1290,9 +1294,10 @@ async function eliminarIntegrante(u) {
    ===================================================================== */
 async function generarCodigoVinculacion() {
   try {
+    const nombreSugerido = "Dispositivo-Remoto-" + Math.floor(1000 + Math.random() * 9000);
     const res = await fetchAuth(API + "/dispositivos/generar-codigo", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nombre_dispositivo: "" })
+      body: JSON.stringify({ nombre_dispositivo: nombreSugerido })
     });
     if (!res.ok) { alert("No se pudo generar el código"); return; }
     const data = await res.json();
@@ -1307,8 +1312,15 @@ async function generarCodigoVinculacion() {
    ===================================================================== */
 function cerrarSesion() {
   if (timerTelemetria) { clearInterval(timerTelemetria); timerTelemetria = null; }
+  if (socketWS) { try { socketWS.onclose = null; socketWS.close(); } catch(e){} }
+
+  // Borrado físico de la cookie de sesión (de raíz, no solo variables en memoria)
+  document.cookie = "aegis_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+
   pinActivo = ""; usuarioActual = null; idSeleccionado = null;
-  mostrar("faseAcceso");
+  codigoCasaActual = null; casaNombreActual = "";
+
+  location.reload();
 }
 
 /* =====================================================================
