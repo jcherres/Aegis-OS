@@ -579,10 +579,10 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
     </div>
 
     <!-- FASE 3: Dashboard -->
-    <div id="faseDashboard" class="hidden grid grid-cols-1 xl:grid-cols-12 gap-6">
+    <div id="faseDashboard" class="hidden grid grid-cols-1 xl:grid-cols-12 gap-6 w-full">
 
       <!-- Columna izquierda -->
-      <div class="xl:col-span-4 flex flex-col gap-6">
+      <div class="xl:col-span-4 flex flex-col gap-6 min-w-0">
         <div class="glass-card p-6 flex flex-col gap-4">
           <div class="flex justify-between items-center flex-wrap gap-2">
             <h3 class="font-display text-sm font-bold text-cyan-300 tracking-[0.15em]">🖥 DISPOSITIVOS</h3>
@@ -607,7 +607,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
       </div>
 
       <!-- Columna derecha -->
-      <div class="xl:col-span-8 flex flex-col gap-6">
+      <div class="xl:col-span-8 flex flex-col gap-6 min-w-0">
         <div class="glass-card p-6">
           <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
             <h3 class="font-display text-sm font-bold text-cyan-300 tracking-[0.15em]">📡 TELEMETRÍA</h3>
@@ -828,6 +828,16 @@ function initSocket() {
         const data = JSON.parse(ev.data);
         if (data.event === "LICENCIA_EXPIRADA") {
           mostrarPaywall(data.mensaje || "Tu período de prueba ha terminado.");
+        }
+        if (data.event === "INTEGRANTES_ACTUALIZADOS") {
+          // Repintado en caliente: el Admin añadió/editó/eliminó a un integrante.
+          // Refresca dispositivos y la cuadrícula neón de perfiles al instante.
+          if (usuarioActual) {
+            cargarDispositivos();
+            cargarIntegrantes();
+          } else if (codigoCasaActual) {
+            cargarPerfiles();
+          }
         }
       } catch (e) {}
     };
@@ -1704,7 +1714,7 @@ def usuarios_de_casa(codigo: str):
 
 
 @app.post("/casas/{codigo}/usuarios/crear")
-def crear_usuario_en_casa(codigo: str, data: NuevoPerfilSchema):
+async def crear_usuario_en_casa(codigo: str, data: NuevoPerfilSchema):
     casa = buscar_casa_por_codigo(codigo)
     if not casa:
         raise HTTPException(status_code=404, detail="No existe ninguna casa con ese código")
@@ -1717,6 +1727,10 @@ def crear_usuario_en_casa(codigo: str, data: NuevoPerfilSchema):
             (casa["id"], data.nombre, hash_pin(data.pin, salt), salt, ROL_USUARIO, data.avatar),
         )
         conexion.commit()
+    try:
+        await gestor_ws.broadcast({"event": "INTEGRANTES_ACTUALIZADOS", "casa": casa["codigo_invitacion"]})
+    except Exception:
+        pass
     return {"mensaje": "Perfil creado exitosamente"}
 
 
@@ -1771,6 +1785,10 @@ async def editar_usuario_admin(
             (data.nombre, hash_pin(data.pin, salt), salt, data.avatar, user_id),
         )
         conexion.commit()
+    try:
+        await gestor_ws.broadcast({"event": "INTEGRANTES_ACTUALIZADOS", "casa_id": usuario["casa_id"]})
+    except Exception:
+        pass
     return {"mensaje": "Usuario actualizado"}
 
 
@@ -1795,6 +1813,10 @@ async def cambiar_rol_usuario(
     with db() as conexion:
         conexion.ejecutar("UPDATE usuarios SET rol = ? WHERE id = ?", (data.rol, user_id))
         conexion.commit()
+    try:
+        await gestor_ws.broadcast({"event": "INTEGRANTES_ACTUALIZADOS", "casa_id": usuario["casa_id"]})
+    except Exception:
+        pass
     return {"mensaje": f"Rol de '{objetivo['nombre']}' actualizado a {data.rol}"}
 
 
@@ -1818,6 +1840,10 @@ async def eliminar_usuario(
     with db() as conexion:
         conexion.ejecutar("DELETE FROM usuarios WHERE id = ?", (user_id,))
         conexion.commit()
+    try:
+        await gestor_ws.broadcast({"event": "INTEGRANTES_ACTUALIZADOS", "casa_id": usuario["casa_id"]})
+    except Exception:
+        pass
     return {"mensaje": f"Usuario '{objetivo['nombre']}' eliminado"}
 
 
@@ -1947,4 +1973,289 @@ async def controlar_energia(dev_id: int, data: AccionEnergia, usuario: dict = De
         if not dispositivo["mac"]:
             raise HTTPException(status_code=400, detail="Este dispositivo no tiene MAC registrada para Wake-on-LAN")
         try:
-            enviar_wol(disposit
+            enviar_wol(dispositivo["mac"])
+            return {"mensaje": "Paquete Wake-on-LAN enviado a la red local"}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    encolar_comando(dev_id, accion)
+    return {"mensaje": f"Comando '{accion}' encolado. Se ejecutará cuando el Agente lo reciba."}
+
+
+# ===========================================================================
+# 18 · VINCULACIÓN AUTÓNOMA
+# ===========================================================================
+def _construir_script_agente(url_base: str, token: str) -> str:
+    return AGENTE_TEMPLATE.replace("__AEGIS_URL__", url_base).replace("__AEGIS_TOKEN__", token)
+
+
+def _pagina_error(titulo: str, mensaje: str) -> str:
+    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<title>Aegis OS — Error</title>
+<style>
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#000;color:#94a3b8;font-family:system-ui,sans-serif;padding:24px}}
+.card{{background:linear-gradient(155deg,rgba(8,20,36,.95),rgba(2,6,23,.98));
+border:1px solid rgba(251,113,133,.35);border-radius:28px;padding:48px 36px;max-width:520px;
+text-align:center;box-shadow:0 0 90px -30px rgba(244,63,94,.6)}}
+h1{{font-family:'Orbitron',sans-serif;color:#fda4af;font-size:26px;margin:16px 0}}
+.icon{{font-size:56px}}
+</style></head><body><div class="card">
+<div class="icon">⚠</div><h1>{html.escape(titulo)}</h1><p>{html.escape(mensaje)}</p>
+</div></body></html>"""
+
+
+def _pagina_vincular(nombre: str, token: str, codigo: str, script: str) -> str:
+    script_b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    data_url = f"data:text/x-python;base64,{script_b64}"
+    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AEGIS FAMILY OS — Vinculación</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{{margin:0;background:#000;color:#94a3b8;font-family:system-ui,sans-serif;padding:32px 20px;
+background-image:radial-gradient(circle at 15% 5%,rgba(6,182,212,.20),transparent 42%),
+radial-gradient(circle at 88% 12%,rgba(59,130,246,.16),transparent 45%);}}
+.wrap{{max-width:920px;margin:0 auto}}
+.card{{background:linear-gradient(155deg,rgba(8,20,36,.95),rgba(2,6,23,.98));
+border:1px solid rgba(34,211,238,.2);border-radius:32px;padding:40px 32px;
+box-shadow:0 0 110px -30px rgba(34,211,238,.6);margin-bottom:24px}}
+h1{{font-family:'Orbitron',sans-serif;font-size:26px;color:#67e8f9;letter-spacing:.12em;margin:0 0 8px}}
+.sub{{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.35em;color:rgba(103,232,249,.6);margin:0 0 28px}}
+.row{{background:rgba(2,6,23,.7);border:1px solid rgba(34,211,238,.15);border-radius:18px;padding:18px;margin-bottom:14px}}
+.row-label{{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.3em;color:#64748b;margin-bottom:6px}}
+.row-value{{font-family:'JetBrains Mono',monospace;font-size:14px;color:#67e8f9;word-break:break-all}}
+.token{{color:#fcd34d}}
+.btn{{display:inline-flex;width:100%;padding:22px;border-radius:20px;
+font-family:'Orbitron',sans-serif;font-weight:900;font-size:15px;letter-spacing:.18em;
+text-transform:uppercase;text-decoration:none;color:#a5f3fc;text-align:center;justify-content:center;
+border:1px solid rgba(34,211,238,.6);
+background:linear-gradient(150deg,rgba(34,211,238,.18),rgba(59,130,246,.08));
+box-shadow:0 0 44px -8px rgba(34,211,238,.9)}}
+pre{{background:#020617;border:1px solid rgba(34,211,238,.15);border-radius:16px;
+padding:18px;color:#67e8f9;font-size:11px;line-height:1.7;max-height:300px;overflow:auto}}
+ul{{font-family:'JetBrains Mono',monospace;font-size:11px;line-height:2;color:#94a3b8;padding-left:0;list-style:none}}
+ul li::before{{content:'▸ ';color:#22d3ee}}
+h2{{font-family:'Orbitron',sans-serif;font-size:13px;letter-spacing:.18em;color:#c084fc;margin:24px 0 10px}}
+</style></head><body>
+<div class="wrap"><div class="card">
+<h1>◆ DISPOSITIVO VINCULADO</h1>
+<p class="sub">AEGIS FAMILY OS · SISTEMA AUTÓNOMO</p>
+<div class="row"><div class="row-label">Nombre</div><div class="row-value">{html.escape(nombre)}</div></div>
+<div class="row"><div class="row-label">Código usado</div><div class="row-value">{html.escape(codigo)}</div></div>
+<div class="row"><div class="row-label">Token del agente</div><div class="row-value token">{html.escape(token)}</div></div>
+<h2>▶ Instalación automática</h2>
+<a class="btn" download="aegis_agente.py" href="{data_url}">📥 Descargar Agente e Instalar</a>
+<h2>▶ Instrucciones</h2>
+<ul>
+<li><b>Windows:</b> doble clic sobre aegis_agente.py (Python 3.10+).</li>
+<li><b>macOS / Linux:</b> <code>python3 aegis_agente.py</code></li>
+<li><b>Smart TV / Enchufe:</b> usar el agente o webhook compatible.</li>
+</ul>
+<h2>▶ Código fuente</h2>
+<pre>{html.escape(script)}</pre>
+</div></div></body></html>"""
+
+
+@app.get("/vincular/{codigo}", response_class=HTMLResponse)
+def vincular_autonomo(codigo: str, request: Request):
+    codigo = codigo.strip()
+    if not codigo or len(codigo) != 6 or not codigo.isdigit():
+        return HTMLResponse(_pagina_error("Código inválido", "El código debe tener 6 dígitos."), status_code=400)
+
+    with db() as conexion:
+        conexion.ejecutar("SELECT * FROM codigos_vinculacion WHERE codigo = ?", (codigo,))
+        fila = conexion.uno()
+        if not fila:
+            return HTMLResponse(_pagina_error("Código no encontrado", "Verifica el código."), status_code=404)
+        if fila["usado"]:
+            return HTMLResponse(_pagina_error("Código ya utilizado", "Pide uno nuevo."), status_code=400)
+        try:
+            expira = datetime.fromisoformat(fila["expira_en"])
+        except (ValueError, TypeError):
+            expira = datetime.utcnow() - timedelta(seconds=1)
+        if expira < datetime.utcnow():
+            return HTMLResponse(_pagina_error("Código expirado", "Caducó a los 10 minutos."), status_code=400)
+
+        nombre_auto = (fila.get("nombre_sugerido") or "").strip() or f"Equipo-{secrets.token_hex(2).upper()}"
+        tipo_auto = fila.get("tipo_sugerido") or "pc"
+        ip_visitante = request.client.host if request.client else "desconocida"
+        token = secrets.token_hex(16)
+
+        conexion.ejecutar(
+            "INSERT INTO dispositivos (casa_id, nombre, tipo, ip, mac, token, ubicacion, estado) "
+            "VALUES (?, ?, ?, ?, '', ?, 'Pendiente de ubicación', 'ONLINE')",
+            (fila["casa_id"], nombre_auto, tipo_auto, ip_visitante, token),
+            es_insert=True,
+        )
+        conexion.ejecutar("UPDATE codigos_vinculacion SET usado = 1 WHERE id = ?", (fila["id"],))
+        conexion.commit()
+
+    base = _url_base(request)
+    script = _construir_script_agente(base, token)
+    return HTMLResponse(_pagina_vincular(nombre_auto, token, codigo, script))
+
+
+# ===========================================================================
+# 19 · MERCADO PAGO PERÚ — WEBHOOK (match por codigo_invitacion)
+# ===========================================================================
+@app.post("/api/v1/pagos/mercado-pago/webhook")
+async def webhook_mercado_pago(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON inválido")
+
+    tipo = (payload.get("type") or payload.get("topic") or "").lower()
+    accion = (payload.get("action") or "").lower()
+    if "payment" not in tipo and "payment" not in accion:
+        return {"ok": True, "ignored": tipo or accion or "unknown"}
+
+    data = payload.get("data") or {}
+    payment_id = data.get("id") or payload.get("id") or payload.get("resource")
+    external_ref = str(payload.get("external_reference") or data.get("external_reference") or "").strip().upper()
+
+    casa: Optional[dict] = None
+    if external_ref:
+        casa = buscar_casa_por_codigo(external_ref)
+
+    if casa is None and MP_ACCESS_TOKEN and requests and payment_id:
+        try:
+            r = requests.get(
+                f"https://api.mercadopago.com/v1/payments/{payment_id}",
+                headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+                timeout=10,
+            )
+            if r.ok:
+                info = r.json()
+                ref = str(info.get("external_reference") or "").strip().upper()
+                estado_pago = (info.get("status") or "").lower()
+                if ref and estado_pago in ("approved", "authorized"):
+                    casa = buscar_casa_por_codigo(ref)
+                    external_ref = ref
+        except Exception as e:
+            log.warning("No se pudo consultar pago MP %s: %s", payment_id, e)
+
+    if casa is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No se pudo localizar la casa por external_reference (código de invitación)",
+        )
+
+    ahora = datetime.utcnow().isoformat()
+    with db() as conexion:
+        conexion.ejecutar("UPDATE casas SET creado_en = ? WHERE id = ?", (ahora, casa["id"]))
+        conexion.commit()
+
+    return {
+        "ok": True, "casa_id": casa["id"],
+        "codigo_invitacion": casa["codigo_invitacion"],
+        "renovado_en": ahora,
+        "mensaje": f"Suscripción renovada por {DIAS_SUSCRIPCION} días",
+    }
+
+
+# ===========================================================================
+# 20 · AGENTE LOCAL
+# ===========================================================================
+def _agente_autenticado(x_device_token: Optional[str]) -> dict:
+    if not x_device_token:
+        raise HTTPException(status_code=401, detail="Falta X-Device-Token")
+    with db() as conexion:
+        conexion.ejecutar("SELECT * FROM dispositivos WHERE token = ?", (x_device_token,))
+        dispositivo = conexion.uno()
+    if not dispositivo:
+        raise HTTPException(status_code=403, detail="Token de dispositivo inválido")
+    return dispositivo
+
+
+@app.get("/agente/comando")
+def agente_obtener_comando(x_device_token: str = Header(None)):
+    dispositivo = _agente_autenticado(x_device_token)
+    with db() as conexion:
+        conexion.ejecutar(
+            "SELECT * FROM comandos WHERE dispositivo_id = ? AND estado = 'PENDIENTE' "
+            "ORDER BY creado_en ASC LIMIT 1",
+            (dispositivo["id"],),
+        )
+        comando = conexion.uno()
+        if comando:
+            conexion.ejecutar("UPDATE comandos SET estado = 'ENVIADO' WHERE id = ?", (comando["id"],))
+            conexion.commit()
+    if not comando:
+        return {"comando_id": None, "accion": None}
+    return {"comando_id": comando["id"], "accion": comando["accion"]}
+
+
+@app.post("/agente/comando/{comando_id}/completado")
+def agente_marcar_completado(comando_id: int, x_device_token: str = Header(None)):
+    dispositivo = _agente_autenticado(x_device_token)
+    with db() as conexion:
+        conexion.ejecutar(
+            "UPDATE comandos SET estado = 'EJECUTADO' WHERE id = ? AND dispositivo_id = ?",
+            (comando_id, dispositivo["id"]),
+        )
+        conexion.commit()
+    return {"mensaje": "Comando marcado como ejecutado"}
+
+
+@app.post("/agente/telemetria")
+def agente_reportar_telemetria(
+    data: TelemetriaAgenteSchema,
+    request: Request,
+    x_device_token: str = Header(None),
+):
+    dispositivo = _agente_autenticado(x_device_token)
+    ip_origen = request.client.host if request.client else None
+    with db() as conexion:
+        if ip_origen:
+            conexion.ejecutar(
+                "UPDATE dispositivos SET cpu = ?, ram = ?, disco = ?, bateria = ?, "
+                "procesos = ?, actualizado_en = ?, estado = 'ONLINE', ip = ? WHERE id = ?",
+                (data.cpu, data.ram, data.disco, data.bateria, data.procesos,
+                 datetime.utcnow().isoformat(), ip_origen, dispositivo["id"]),
+            )
+        else:
+            conexion.ejecutar(
+                "UPDATE dispositivos SET cpu = ?, ram = ?, disco = ?, bateria = ?, "
+                "procesos = ?, actualizado_en = ?, estado = 'ONLINE' WHERE id = ?",
+                (data.cpu, data.ram, data.disco, data.bateria, data.procesos,
+                 datetime.utcnow().isoformat(), dispositivo["id"]),
+            )
+        conexion.commit()
+    return {"mensaje": "Telemetría recibida", "ip_registrada": ip_origen}
+
+
+# ===========================================================================
+# 21 · WEBSOCKET
+# ===========================================================================
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await gestor_ws.conectar(websocket)
+    try:
+        await websocket.send_json({"event": "BIENVENIDA", "version": "12.1"})
+        while True:
+            try:
+                msg = await websocket.receive_text()
+                if msg == "ping":
+                    await websocket.send_json({"event": "pong"})
+            except WebSocketDisconnect:
+                break
+    except Exception:
+        pass
+    finally:
+        gestor_ws.desconectar(websocket)
+
+
+# ===========================================================================
+# 22 · ENTRYPOINT
+# ===========================================================================
+if __name__ == "__main__":
+    import uvicorn
+    puerto_dinamico = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        "Servidor_Universal_Aegis_Family_OS:app",
+        host="0.0.0.0",
+        port=puerto_dinamico,
+        reload=False,
+    )
