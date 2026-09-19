@@ -801,15 +801,20 @@ if __name__ == "__main__":
     # ==============================================================================
 
 
-    # El arranque final de Uvicorn va siempre al último
-    puerto_dinamico = int(os.getenv("PORT", 8000))
-    print(f"[AEGIS-SAAS] Levantando servidor en el puerto: {puerto_dinamico}")
-    uvicorn.run(objeto_app, host="0.0.0.0", port=puerto_dinamico)
+   # ==============================================================================
+# ENLACE DE ENTRADA PRINCIPAL (OBLIGADO EN LA RAÍZ FUERA DE FUNCIONES)
+# ==============================================================================
+@app.get("/", response_class=HTMLResponse)
+async def cargar_interfaz_principal():
     from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=HTML_DASHBOARD, status_code=200)
 
-    @objeto_app.get("/", response_class=HTMLResponse)
-    async def cargar_interfaz_principal():
-        # Cargamos tu diseño de cristal clásico unificado
-        return HTMLResponse(content=HTML_DASHBOARD, status_code=200)
+if __name__ == "__main__":
+    import uvicorn
+    # Buscamos el puerto dinámico que exige la red de Render
+    puerto_dinamico = int(os.getenv("PORT", 8000))
+    print(f"[AEGIS-SAAS] Levantando en puerto: {puerto_dinamico}")
+    uvicorn.run(app, host="0.0.0.0", port=puerto_dinamico)
+
 
 
