@@ -26,10 +26,8 @@ Render.com → Start Command:
 
 import os
 import hmac
-import base64
-import html
+import json
 import sqlite3
-import subprocess
 import hashlib
 import secrets
 import socket
@@ -65,6 +63,11 @@ if DATABASE_URL.startswith("postgres://"):
 
 PIN_SEMILLA_MASTER = os.environ.get("AEGIS_MASTER_PIN", "9999")
 CORS_ORIGIN_REGEX = os.environ.get("AEGIS_CORS_REGEX", r".*")
+# 🐛 FIX #3 (CORS): un origin_regex comodín (".*") combinado con allow_credentials=True
+# viola la spec fetch/CORS — el navegador descarta silenciosamente la respuesta con
+# credenciales. La API autentica por headers (X-Pin/X-Casa), no por cookies, así que
+# no necesita credentials=True salvo que el operador lo pida explícitamente.
+CORS_CREDENCIALES = os.environ.get("AEGIS_CORS_CREDENCIALES", "FALSE").upper() == "TRUE"
 
 MODO_COMERCIAL = os.environ.get("AEGIS_MODO_COMERCIAL", "FALSE").upper() == "TRUE"
 
@@ -78,7 +81,7 @@ DIAS_SUSCRIPCION = int(os.environ.get("AEGIS_DIAS_SUSCRIPCION", "30"))
 #     python -c "import hashlib; print(hashlib.sha256('TU_CODIGO'.encode()).hexdigest())"
 # ---------------------------------------------------------------------------
 _VIP_HASHES = frozenset({
-    hashlib.sha256(b"FAM123").hexdigest(),
+    "99c8525b68df419a4e33b669046c76e279fb08eef2f3ff6d750dfbb9e6cdb195",
 })
 
 logging.basicConfig(
@@ -141,20 +144,28 @@ class DispositivoSchema(BaseModel):
     tipo: TipoDispositivo = "pc"
 
 
-class CodigoVinculacionSchema(BaseModel):
-    nombre_dispositivo: Optional[str] = ""
-
-
 class AccionEnergia(BaseModel):
     accion: Literal["ENCENDER", "BLOQUEAR", "APAGAR", "REINICIAR"]
 
 
-class TelemetriaAgenteSchema(BaseModel):
-    cpu: Optional[str] = None
-    ram: Optional[str] = None
-    disco: Optional[str] = None
-    bateria: Optional[str] = None
-    procesos: Optional[int] = None
+class RegistroNodoSchema(BaseModel):
+    """Alta/actualización de un nodo 'agentless': el propio navegador se anuncia."""
+    device_uid: str = Field(min_length=8, max_length=128)
+    nombre: str = Field(min_length=1, max_length=120)
+    tipo: TipoDispositivo = "pc"
+
+
+class TelemetriaWebSchema(BaseModel):
+    """Telemetría capturada 100% con Web APIs nativas del navegador (sin agente)."""
+    device_uid: str = Field(min_length=8, max_length=128)
+    cpu: Optional[str] = None            # navigator.hardwareConcurrency
+    ram: Optional[str] = None            # navigator.deviceMemory (aprox.)
+    bateria: Optional[str] = None        # navigator.getBattery()
+    ventana_activa: Optional[str] = None # document.title (foco/actividad)
+    hilos: Optional[int] = None          # navigator.hardwareConcurrency
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    ubicacion: Optional[str] = None
 
 
 # ===========================================================================
@@ -586,7 +597,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
         <div class="glass-card p-6 flex flex-col gap-4">
           <div class="flex justify-between items-center flex-wrap gap-2">
             <h3 class="font-display text-sm font-bold text-cyan-300 tracking-[0.15em]">🖥 DISPOSITIVOS</h3>
-            <button id="btnVincular" onclick="generarCodigoVinculacion()" class="hidden btn-glass px-3 py-2 text-[10px] tracking-[0.2em] text-cyan-200 uppercase">+ VINCULAR</button>
+            <button id="btnVincular" onclick="mostrarCodigoCasa()" class="hidden btn-glass px-3 py-2 text-[10px] tracking-[0.2em] text-cyan-200 uppercase">🔗 COMPARTIR CÓDIGO</button>
           </div>
           <div id="listaDispositivos" class="space-y-3 max-h-[45vh] overflow-y-auto pr-1"></div>
         </div>
@@ -616,11 +627,11 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
           <div class="grid grid-cols-3 gap-3 mb-3">
             <div class="hud-box p-4 text-center"><p class="text-[10px] tracking-[0.25em] text-slate-500 mb-2">CPU</p><p id="mCpu" class="font-display text-xl font-black txt-cyan">--</p></div>
             <div class="hud-box p-4 text-center"><p class="text-[10px] tracking-[0.25em] text-slate-500 mb-2">RAM</p><p id="mRam" class="font-display text-xl font-black txt-cyan">--</p></div>
-            <div class="hud-box p-4 text-center"><p class="text-[10px] tracking-[0.25em] text-slate-500 mb-2">DISCO</p><p id="mDisco" class="font-display text-xl font-black txt-cyan">--</p></div>
+            <div class="hud-box p-4 text-center"><p class="text-[10px] tracking-[0.25em] text-slate-500 mb-2">ENFOQUE</p><p id="mDisco" class="font-display text-sm font-black txt-cyan truncate" title="">--</p></div>
           </div>
           <div class="grid grid-cols-2 gap-3">
-            <div class="hud-box p-4 text-center"><p class="text-[10px] tracking-[0.25em] text-slate-500 mb-2">BATERÍA</p><p id="mBat" class="font-display text-xl font-black txt-cyan">--</p></div>
-            <div class="hud-box p-4 text-center"><p class="text-[10px] tracking-[0.25em] text-slate-500 mb-2">PROCESOS</p><p id="mProc" class="font-display text-xl font-black txt-cyan">--</p></div>
+            <div class="hud-box p-4 text-center"><p class="text-[10px] tracking-[0.25em] text-slate-500 mb-2">BATERÍA REAL</p><p id="mBat" class="font-display text-xl font-black txt-cyan">--</p></div>
+            <div class="hud-box p-4 text-center"><p class="text-[10px] tracking-[0.25em] text-slate-500 mb-2">HILOS LÓGICOS</p><p id="mProc" class="font-display text-xl font-black txt-cyan">--</p></div>
           </div>
         </div>
 
@@ -672,15 +683,29 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- ================= MODAL VINCULACIÓN ================= -->
+<!-- ================= MODAL CÓDIGO DE CASA (AGENTLESS) ================= -->
 <div id="modalVinculacion" class="hidden fixed inset-0 bg-black/90 backdrop-blur-xl flex items-center justify-center p-4 z-50">
   <div class="glass-card p-7 w-full max-w-lg text-center flex flex-col gap-5">
-    <h3 class="font-display text-lg font-black text-white tracking-[0.1em]">🔗 VINCULAR DISPOSITIVO</h3>
-    <p class="text-[10px] tracking-[0.2em] text-slate-500">COMPARTE ESTE CÓDIGO DE 6 DÍGITOS (10 MIN)</p>
+    <h3 class="font-display text-lg font-black text-white tracking-[0.1em]">🔗 CÓDIGO ÚNICO DE LA CASA</h3>
+    <p class="text-[10px] tracking-[0.2em] text-slate-500">CUALQUIER INTEGRANTE LO INGRESA EN ESTA MISMA WEB, DESDE SU PROPIO DISPOSITIVO — SIN INSTALAR NADA</p>
     <div id="codigoVincBox" class="hud-box p-5 text-4xl tracking-[0.5em] txt-cyan">------</div>
-    <p class="text-[10px] tracking-[0.25em] text-amber-400">INGRÉSALO EN: <span id="urlVincular" class="text-cyan-300">/vincular/------</span></p>
+    <p class="text-[10px] tracking-[0.25em] text-amber-400">ABRE ESTA MISMA URL Y ESCRIBE EL CÓDIGO</p>
     <button onclick="cerrarModal('modalVinculacion')" class="btn-glass py-3 text-[11px] tracking-[0.2em]">CERRAR</button>
   </div>
+</div>
+
+<!-- ================= OVERLAY DE BLOQUEO REMOTO (COMANDOS DE ENERGÍA) ================= -->
+<div id="overlayBloqueoRemoto" class="hidden fixed inset-0 z-[10000] flex-col items-center justify-center text-center px-6"
+     style="background:radial-gradient(circle at 50% 30%, rgba(244,63,94,.28), #000 70%)">
+  <div class="text-7xl mb-6 txt-rose blink">🔒</div>
+  <h1 class="font-display text-3xl md:text-5xl font-black txt-rose tracking-[0.1em] mb-3">SESIÓN BLOQUEADA</h1>
+  <p class="text-xs tracking-[0.3em] text-rose-200/80 max-w-md">EL ADMINISTRADOR DE TU CASA CONGELÓ ESTE DISPOSITIVO A DISTANCIA</p>
+</div>
+
+<!-- ================= PANTALLA DE DESCONEXIÓN REMOTA ================= -->
+<div id="overlayDesconexion" class="hidden fixed inset-0 z-[10000] flex-col items-center justify-center text-center px-6 bg-black">
+  <p class="font-display text-2xl txt-rose tracking-[0.1em] mb-3">⏹ DESCONEXIÓN REMOTA</p>
+  <p class="text-[11px] tracking-[0.25em] text-slate-500">TU CASA CERRÓ ESTA SESIÓN A DISTANCIA</p>
 </div>
 
 <!-- ================= MODAL NUEVO INTEGRANTE ================= -->
@@ -755,6 +780,10 @@ let socketWS = null;
 let avatarNuevoTemp = "👤";
 let avatarEditTemp = "👤";
 let editandoIntegranteId = null;
+let miDeviceUid = null;
+let miDispositivoId = null;
+let ultimaLat = null;
+let ultimaLng = null;
 
 const AVATARES = ["👨‍💻","👩‍💻","🕵️‍♂️","🤖","👽","👑","🧙‍♂️","🚀","🛡️","🦊","🐱","👤","👵","👴","🎓","🦸","🐼","🐯"];
 
@@ -800,6 +829,7 @@ async function centrarPorIP() {
 }
 
 function centrarMapa(lat, lng, etiqueta) {
+  ultimaLat = lat; ultimaLng = lng;
   if (!mapaLeaflet) return;
   mapaLeaflet.setView([lat, lng], 15);
   const iconoNeon = L.divIcon({
@@ -823,6 +853,13 @@ function initSocket() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = proto + "//" + location.host + "/ws";
     socketWS = new WebSocket(url);
+    socketWS.onopen = () => {
+      // Reingeniería Agentless: esta misma pestaña se anuncia como nodo ante el
+      // backend para poder recibir comandos de energía dirigidos en tiempo real.
+      try {
+        socketWS.send(JSON.stringify({ tipo: "registro", device_uid: obtenerDeviceUid() }));
+      } catch (e) {}
+    };
     socketWS.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
@@ -830,14 +867,20 @@ function initSocket() {
           mostrarPaywall(data.mensaje || "Tu período de prueba ha terminado.");
         }
         if (data.event === "INTEGRANTES_ACTUALIZADOS") {
-          // Repintado en caliente: el Admin añadió/editó/eliminó a un integrante.
-          // Refresca dispositivos y la cuadrícula neón de perfiles al instante.
+          // Sincronización en caliente: en cuanto el Admin añade, edita o
+          // elimina a un integrante desde sus modales, TODAS las pantallas
+          // familiares conectadas (no solo la del Admin) ejecutan de
+          // inmediato cargarDispositivos() + entrarAlBunker() para repintar
+          // la cuadrícula neón de círculos sin esperar el timer ni dar lag.
           if (usuarioActual) {
             cargarDispositivos();
-            cargarIntegrantes();
+            entrarAlBunker();
           } else if (codigoCasaActual) {
             cargarPerfiles();
           }
+        }
+        if (data.event === "COMANDO_ENERGIA") {
+          aplicarComandoRemoto(data.accion);
         }
       } catch (e) {}
     };
@@ -891,7 +934,7 @@ function mostrarPaywall(msg) {
 }
 
 function headersAuth() {
-  const h = { "X-Pin": pinActivo };
+  const h = { "X-Pin": pinActivo, "X-Device-Uid": obtenerDeviceUid() };
   if (codigoCasaActual) h["X-Casa"] = codigoCasaActual;
   return h;
 }
@@ -910,9 +953,60 @@ async function fetchAuth(url, opts = {}) {
 }
 
 /* =====================================================================
-   BATERÍA REAL DEL NAVEGADOR
+   IDENTIDAD DEL NODO (AGENTLESS) — sin instalación, sin script descargable.
+   El propio navegador genera y conserva un identificador persistente y se
+   anuncia ante la casa con el ÚNICO código de invitación de 6 caracteres.
    ===================================================================== */
-async function obtenerBateriaNavegador() {
+function obtenerDeviceUid() {
+  if (miDeviceUid) return miDeviceUid;
+  try {
+    miDeviceUid = localStorage.getItem("aegis_device_uid");
+  } catch (e) { miDeviceUid = null; }
+  if (!miDeviceUid) {
+    miDeviceUid = (crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ("dev-" + Date.now() + "-" + Math.random().toString(16).slice(2));
+    try { localStorage.setItem("aegis_device_uid", miDeviceUid); } catch (e) {}
+  }
+  return miDeviceUid;
+}
+
+function detectarTipoDispositivo() {
+  const ua = navigator.userAgent || "";
+  if (/SmartTV|Tizen|WebOS|HbbTV|GoogleTV|AppleTV/i.test(ua)) return "smart_tv";
+  if (/iPad|Tablet(?!.*Mobile)/i.test(ua)) return "tablet";
+  if (/Mobi|Android.*Mobile|iPhone/i.test(ua)) return "smartphone";
+  return "pc";
+}
+
+function nombreNodoSugerido() {
+  const etiquetas = { pc: "PC", smartphone: "Smartphone", tablet: "Tablet", smart_tv: "Smart TV" };
+  const tipo = detectarTipoDispositivo();
+  const quien = (usuarioActual && usuarioActual.nombre) ? usuarioActual.nombre : "Integrante";
+  return (etiquetas[tipo] || "Dispositivo") + " de " + quien;
+}
+
+/* =====================================================================
+   ALTA DEL NODO + TELEMETRÍA 100% WEB APIS NATIVAS (sin agente/root)
+   ===================================================================== */
+async function registrarNodo() {
+  try {
+    const res = await fetchAuth(API + "/dispositivos/registrar-nodo", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        device_uid: obtenerDeviceUid(),
+        nombre: nombreNodoSugerido(),
+        tipo: detectarTipoDispositivo(),
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      miDispositivoId = data.dispositivo_id;
+    }
+  } catch (e) {}
+}
+
+async function obtenerBateriaTexto() {
   if (!navigator.getBattery) return null;
   try {
     const bat = await navigator.getBattery();
@@ -920,6 +1014,74 @@ async function obtenerBateriaNavegador() {
     const estado = bat.charging ? "⚡ Cargando" : "🔋 Batería";
     return pct + "% (" + estado + ")";
   } catch (e) { return null; }
+}
+
+async function enviarTelemetriaWeb() {
+  if (!usuarioActual) return;
+  const hilos = navigator.hardwareConcurrency || null;
+  const payload = {
+    device_uid: obtenerDeviceUid(),
+    cpu: hilos ? (hilos + " núcleos lógicos") : "N/D",
+    ram: navigator.deviceMemory ? (navigator.deviceMemory + " GB (aprox.)") : "N/D",
+    bateria: await obtenerBateriaTexto(),
+    ventana_activa: document.title || "Sin título",
+    hilos: hilos,
+  };
+  if (ultimaLat != null && ultimaLng != null) {
+    payload.lat = ultimaLat; payload.lng = ultimaLng;
+    payload.ubicacion = "Ubicación detectada";
+  }
+  try {
+    await fetchAuth(API + "/dispositivos/telemetria-web", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {}
+}
+
+function mostrarCodigoCasa() {
+  document.getElementById("codigoVincBox").innerText = codigoCasaActual || "------";
+  mostrarModal("modalVinculacion");
+}
+
+/* =====================================================================
+   COMANDOS REMOTOS EN LA PESTAÑA DEL INTEGRANTE (Fullscreen + Keyboard Lock)
+   Sin agente de sistema operativo con permisos root: las directivas de
+   energía actúan sobre la propia pestaña del navegador vía WebSocket.
+   ===================================================================== */
+function aplicarComandoRemoto(accion) {
+  if (accion === "BLOQUEAR") mostrarOverlayBloqueo();
+  else if (accion === "DESBLOQUEAR") quitarOverlayBloqueo();
+  else if (accion === "APAGAR") ejecutarApagadoRemoto();
+  else if (accion === "REINICIAR") location.reload();
+}
+
+async function mostrarOverlayBloqueo() {
+  const ov = document.getElementById("overlayBloqueoRemoto");
+  if (!ov) return;
+  ov.classList.remove("hidden");
+  ov.classList.add("flex");
+  document.body.style.overflow = "hidden";
+  try { if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); } catch (e) {}
+  try { if (navigator.keyboard && navigator.keyboard.lock) await navigator.keyboard.lock(); } catch (e) {}
+}
+
+function quitarOverlayBloqueo() {
+  const ov = document.getElementById("overlayBloqueoRemoto");
+  if (ov) { ov.classList.add("hidden"); ov.classList.remove("flex"); }
+  document.body.style.overflow = "";
+  try { if (navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock(); } catch (e) {}
+  try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen(); } catch (e) {}
+}
+
+function ejecutarApagadoRemoto() {
+  if (timerTelemetria) { clearInterval(timerTelemetria); timerTelemetria = null; }
+  try { if (socketWS) { socketWS.onclose = null; socketWS.close(); } } catch (e) {}
+  try { window.close(); } catch (e) {}
+  setTimeout(() => {
+    const ov = document.getElementById("overlayDesconexion");
+    if (ov) { ov.classList.remove("hidden"); ov.classList.add("flex"); }
+  }, 300);
 }
 
 /* =====================================================================
@@ -1043,10 +1205,15 @@ function entrarAlDashboard() {
   document.getElementById("avisoGestor").classList.toggle("hidden", usuarioActual.rol !== "GESTOR_CASA");
 
   mostrar("faseDashboard");
-  cargarDispositivos();
+
+  // Reingeniería Agentless: esta pestaña se registra como nodo controlado de
+  // la casa y empieza a reportar su propia telemetría con Web APIs nativas.
+  registrarNodo().then(() => { cargarDispositivos(); enviarTelemetriaWeb(); });
   cargarIntegrantes();
   if (timerTelemetria) clearInterval(timerTelemetria);
-  timerTelemetria = setInterval(() => { cargarDispositivos(); cargarIntegrantes(); }, 12000);
+  timerTelemetria = setInterval(() => {
+    cargarDispositivos(); cargarIntegrantes(); enviarTelemetriaWeb();
+  }, 12000);
 }
 
 async function cargarDispositivos() {
@@ -1054,14 +1221,6 @@ async function cargarDispositivos() {
     const res = await fetchAuth(API + "/dispositivos");
     if (!res.ok) return;
     dispositivos = await res.json();
-
-    // Inyectar batería REAL del navegador para el dispositivo local
-    const batNavegador = await obtenerBateriaNavegador();
-    if (batNavegador) {
-      dispositivos.forEach(d => {
-        if (d.es_local && d.specs) d.specs.bateria = batNavegador;
-      });
-    }
     pintarDispositivos();
     if (idSeleccionado) {
       const d = dispositivos.find(x => x.id === idSeleccionado);
@@ -1167,51 +1326,63 @@ async function cargarIntegrantes() {
     const res = await fetch(API + "/casas/" + encodeURIComponent(codigoCasaActual) + "/usuarios");
     if (!res.ok) return;
     integrantes = await res.json();
-    pintarIntegrantes();
+    renderPerfilesCircles(integrantes);
   } catch (e) {}
 }
 
-function pintarIntegrantes() {
+// Alias semántico: "vuelve a entrar al búnker" = refresca la lista de
+// integrantes desde el backend y repinta al instante la cuadrícula neón de
+// círculos (renderPerfilesCircles). Se usa tanto tras crear/editar/eliminar
+// un perfil localmente como al recibir INTEGRANTES_ACTUALIZADOS por WS.
+async function entrarAlBunker() {
+  await cargarIntegrantes();
+}
+
+/* CRUD dinámico de integrantes: cuadrícula de círculos neón. Cuando el rol
+   logueado es ADMIN_CASA, cada círculo renderiza dos botones miniatura
+   tácticos flotantes (EDITAR/ELIMINAR) sobre el propio avatar. */
+function renderPerfilesCircles(miembros) {
+  miembros = miembros || integrantes;
   const cont = document.getElementById("gridIntegrantes");
   cont.innerHTML = "";
-  if (!integrantes.length) {
+  if (!miembros.length) {
     cont.innerHTML = '<p class="text-xs text-slate-500 text-center py-4">Aún no hay integrantes.</p>';
     return;
   }
   const esAdmin = usuarioActual && usuarioActual.rol === "ADMIN_CASA";
 
-  integrantes.forEach(u => {
+  miembros.forEach(m => {
     const wrap = document.createElement("div");
     wrap.className = "flex flex-col items-center";
     wrap.style.position = "relative";
 
     const circle = document.createElement("div");
     circle.className = "avatar-circle";
-    circle.innerHTML = '<span>' + (u.avatar || "👤") + '</span>';
+    circle.innerHTML = '<span>' + (m.avatar || "👤") + '</span>';
 
-    if (esAdmin && u.rol !== "MASTER_ADMIN" && (!usuarioActual || u.id !== usuarioActual.id)) {
+    if (esAdmin && m.rol !== "MASTER_ADMIN" && (!usuarioActual || m.id !== usuarioActual.id)) {
       const btnEdit = document.createElement("button");
       btnEdit.className = "avatar-mini avatar-mini-edit";
       btnEdit.title = "Editar";
       btnEdit.innerText = "✎";
-      btnEdit.onclick = (ev) => { ev.stopPropagation(); abrirModalEditarIntegrante(u); };
+      btnEdit.onclick = (ev) => { ev.stopPropagation(); abrirModalEditarIntegrante(m); };
       circle.appendChild(btnEdit);
 
       const btnDel = document.createElement("button");
       btnDel.className = "avatar-mini avatar-mini-del";
       btnDel.title = "Eliminar";
       btnDel.innerText = "✕";
-      btnDel.onclick = (ev) => { ev.stopPropagation(); eliminarIntegrante(u); };
+      btnDel.onclick = (ev) => { ev.stopPropagation(); eliminarIntegrante(m.id); };
       circle.appendChild(btnDel);
     }
 
     const name = document.createElement("p");
     name.className = "avatar-name";
-    name.innerText = u.nombre;
+    name.innerText = m.nombre;
 
     const badge = document.createElement("span");
-    badge.className = "rol-badge rol-" + u.rol + " mt-1";
-    badge.innerText = u.rol;
+    badge.className = "rol-badge rol-" + m.rol + " mt-1";
+    badge.innerText = m.rol;
 
     wrap.appendChild(circle);
     wrap.appendChild(name);
@@ -1246,7 +1417,10 @@ async function crearIntegrante() {
   const pin = document.getElementById("nuevoIntegrantePin").value.trim();
   if (!nombre || pin.length < 4) { alert("Nombre y PIN (mín. 4 dígitos) requeridos"); return; }
   try {
-    const res = await fetch(API + "/casas/" + encodeURIComponent(codigoCasaActual) + "/usuarios/crear", {
+    // Requiere PIN de ADMIN_CASA (ver fix de seguridad en el backend): antes
+    // esta llamada solo necesitaba el código de casa, que se comparte
+    // libremente, y cualquiera podía crear cuentas sin ser Admin.
+    const res = await fetchAuth(API + "/casas/" + encodeURIComponent(codigoCasaActual) + "/usuarios/crear", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ nombre, pin, avatar: avatarNuevoTemp })
     });
@@ -1280,30 +1454,13 @@ async function guardarEditIntegrante() {
   } catch (e) {}
 }
 
-async function eliminarIntegrante(u) {
-  if (!confirm("¿Eliminar a " + u.nombre + "?")) return;
+async function eliminarIntegrante(uid) {
+  const m = integrantes.find(x => x.id === uid);
+  if (!confirm("¿Eliminar a " + (m ? m.nombre : "este integrante") + "?")) return;
   try {
-    const res = await fetchAuth(API + "/usuarios/" + u.id, { method: "DELETE" });
+    const res = await fetchAuth(API + "/usuarios/" + uid, { method: "DELETE" });
     if (!res.ok) { alert("No se pudo eliminar"); return; }
     await cargarIntegrantes();
-  } catch (e) {}
-}
-
-/* =====================================================================
-   VINCULACIÓN
-   ===================================================================== */
-async function generarCodigoVinculacion() {
-  try {
-    const nombreSugerido = "Dispositivo-Remoto-" + Math.floor(1000 + Math.random() * 9000);
-    const res = await fetchAuth(API + "/dispositivos/generar-codigo", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nombre_dispositivo: nombreSugerido })
-    });
-    if (!res.ok) { alert("No se pudo generar el código"); return; }
-    const data = await res.json();
-    document.getElementById("codigoVincBox").innerText = data.codigo;
-    document.getElementById("urlVincular").innerText = location.origin + "/vincular/" + data.codigo;
-    mostrarModal("modalVinculacion");
   } catch (e) {}
 }
 
@@ -1332,6 +1489,13 @@ document.addEventListener("DOMContentLoaded", () => {
   const inp2 = document.getElementById("inputCodigoCasa");
   if (inp2) inp2.addEventListener("keydown", e => { if (e.key === "Enter") entrarACasa(); });
 });
+
+// Enfoque Hunter: cuando la pestaña vuelve a primer plano o cambia el título,
+// se reporta la nueva ventana activa casi al instante (sin esperar el timer).
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && usuarioActual) enviarTelemetriaWeb();
+});
+window.addEventListener("focus", () => { if (usuarioActual) enviarTelemetriaWeb(); });
 </script>
 </body>
 </html>
@@ -1339,100 +1503,27 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 # ===========================================================================
-# 8 · AGENTE LOCAL (PLANTILLA AUTOINYECTABLE)
+# 8 · (REINGENIERÍA AGENTLESS) — Ya no existe agente local descargable.
+# La sección 8 original generaba y ofrecía para descarga un script Python
+# ('AGENTE_TEMPLATE') que el usuario debía instalar y ejecutar en su equipo.
+# Esto se elimina por completo: ningún integrante instala nada. El propio
+# navegador, con Web APIs nativas, es el único "nodo" (ver secciones 18-20).
 # ===========================================================================
-AGENTE_TEMPLATE = r'''"""
-Aegis Family OS · Agente Local
-Requiere: pip install psutil requests
-"""
-import os, sys, time, platform, subprocess, socket
-import psutil, requests
-
-AEGIS_URL = "__AEGIS_URL__"
-AEGIS_TOKEN = "__AEGIS_TOKEN__"
-
-if AEGIS_URL == "__AEGIS_URL__":
-    AEGIS_URL = os.environ.get("AEGIS_URL", "http://localhost:8000")
-if AEGIS_TOKEN == "__AEGIS_TOKEN__":
-    AEGIS_TOKEN = os.environ.get("AEGIS_TOKEN", "")
-
-INTERVALO = int(os.environ.get("AEGIS_INTERVALO", "10"))
-HEADERS = {"X-Device-Token": AEGIS_TOKEN}
-NOMBRE_HOST = socket.gethostname()
-
-def _log(m): print("[Aegis " + NOMBRE_HOST + "] " + m, flush=True)
-
-def telemetria():
-    try:
-        b = psutil.sensors_battery()
-        bat = (str(int(b.percent)) + "%") if b else "AC Directo"
-    except Exception:
-        bat = "N/D"
-    try:
-        d = str(int(psutil.disk_usage(os.path.abspath(os.sep)).percent)) + "%"
-    except Exception:
-        d = "0%"
-    return {
-        "cpu": str(int(psutil.cpu_percent(interval=1))) + "%",
-        "ram": str(int(psutil.virtual_memory().percent)) + "%",
-        "disco": d, "bateria": bat, "procesos": len(psutil.pids()),
-    }
-
-def ejecutar(accion):
-    sis = platform.system()
-    if sis == "Windows":
-        cmds = {"BLOQUEAR": ["rundll32.exe", "user32.dll,LockWorkStation"],
-                "APAGAR": ["shutdown", "/s", "/t", "5"],
-                "REINICIAR": ["shutdown", "/r", "/t", "5"]}
-    elif sis == "Darwin":
-        cmds = {"BLOQUEAR": ["pmset", "displaysleepnow"],
-                "APAGAR": ["sudo", "shutdown", "-h", "now"],
-                "REINICIAR": ["sudo", "shutdown", "-r", "now"]}
-    else:
-        cmds = {"BLOQUEAR": ["loginctl", "lock-session"],
-                "APAGAR": ["shutdown", "now"],
-                "REINICIAR": ["reboot"]}
-    c = cmds.get(accion)
-    if not c: return
-    try:
-        subprocess.run(c, shell=(sis == "Windows"), check=False)
-        _log("Ejecutado: " + accion)
-    except Exception as e:
-        _log("Error " + accion + ": " + str(e))
-
-def loop():
-    if not AEGIS_TOKEN:
-        _log("ERROR: sin token"); sys.exit(1)
-    _log("Agente arrancado -> " + AEGIS_URL)
-    while True:
-        try:
-            requests.post(AEGIS_URL + "/agente/telemetria", json=telemetria(), headers=HEADERS, timeout=10)
-        except Exception as e:
-            _log("Telemetria fallo: " + str(e))
-        try:
-            r = requests.get(AEGIS_URL + "/agente/comando", headers=HEADERS, timeout=10)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("comando_id") and d.get("accion"):
-                    ejecutar(d["accion"])
-                    requests.post(AEGIS_URL + "/agente/comando/" + str(d["comando_id"]) + "/completado",
-                                  headers=HEADERS, timeout=10)
-        except Exception as e:
-            _log("Comando fallo: " + str(e))
-        time.sleep(INTERVALO)
-
-if __name__ == "__main__":
-    try: loop()
-    except KeyboardInterrupt: _log("Detenido.")
-'''
 
 
 # ===========================================================================
 # 9 · WEBSOCKET MANAGER
 # ===========================================================================
 class GestorWebSockets:
+    """
+    Arquitectura Agentless: cada pestaña de navegador que entra con el código de
+    casa se anuncia sobre este mismo WebSocket con su device_uid. Esto permite
+    empujar comandos dirigidos (bloquear/apagar/reiniciar) a UN dispositivo
+    concreto, sin necesidad de un agente de sistema operativo instalado.
+    """
     def __init__(self):
         self.conexiones: List[WebSocket] = []
+        self.por_dispositivo: dict = {}  # device_uid -> WebSocket
 
     async def conectar(self, ws: WebSocket):
         await ws.accept()
@@ -1441,6 +1532,27 @@ class GestorWebSockets:
     def desconectar(self, ws: WebSocket):
         if ws in self.conexiones:
             self.conexiones.remove(ws)
+        for uid, sock in list(self.por_dispositivo.items()):
+            if sock is ws:
+                self.por_dispositivo.pop(uid, None)
+
+    def registrar_dispositivo(self, device_uid: str, ws: WebSocket):
+        if device_uid:
+            self.por_dispositivo[device_uid] = ws
+
+    def esta_conectado(self, device_uid: str) -> bool:
+        return bool(device_uid) and device_uid in self.por_dispositivo
+
+    async def enviar_a_dispositivo(self, device_uid: str, payload: dict) -> bool:
+        ws = self.por_dispositivo.get(device_uid)
+        if not ws:
+            return False
+        try:
+            await ws.send_json(payload)
+            return True
+        except Exception:
+            self.desconectar(ws)
+            return False
 
     async def broadcast(self, payload: dict):
         muertos = []
@@ -1473,7 +1585,7 @@ app = FastAPI(title="Aegis Family OS — Servidor Universal", version="12.1", li
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=CORS_ORIGIN_REGEX,
-    allow_credentials=True,
+    allow_credentials=CORS_CREDENCIALES,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
@@ -1546,12 +1658,18 @@ async def verificar_pin(x_pin: str = Header(None), x_casa: str = Header(None)) -
     usuario: Optional[dict] = None
     casa: Optional[dict] = None
 
+    # 🐛 FIX #5 (seguridad/lógica): cuando el cliente ya envía X-Casa, la búsqueda del
+    # PIN queda ESTRICTAMENTE acotada a esa casa. Antes, si el PIN no coincidía dentro
+    # de la casa indicada, el código caía a una búsqueda global del PIN en TODAS las
+    # casas del servidor — un escaneo cruzado de credenciales innecesario (ruido y
+    # posible fuga por tiempo de respuesta) que además nunca cambiaba el resultado
+    # final, porque el PIN encontrado en otra casa igual era rechazado más abajo.
     if x_casa:
         casa = buscar_casa_por_codigo(x_casa)
         if casa:
             usuario = buscar_usuario_por_pin(x_pin, casa_id=casa["id"])
-
-    if usuario is None:
+    else:
+        # Sin X-Casa solo tiene sentido el PIN del Master (validado globalmente).
         usuario = buscar_usuario_por_pin(x_pin)
 
     if not usuario:
@@ -1560,8 +1678,6 @@ async def verificar_pin(x_pin: str = Header(None), x_casa: str = Header(None)) -
     if usuario["rol"] != ROL_MASTER:
         if not x_casa:
             raise HTTPException(status_code=400, detail="Falta el código de casa (X-Casa)")
-        if casa is None:
-            casa = buscar_casa_por_codigo(x_casa)
         if not casa or casa["id"] != usuario["casa_id"]:
             raise HTTPException(status_code=403, detail="Este PIN no pertenece a esta casa")
         await _verificar_suscripcion(casa, usuario)
@@ -1577,10 +1693,14 @@ def requerir_rol(*roles_permitidos):
     return dep
 
 
+# 🐛 FIX #2 (lógica muerta/contradictoria): la ruta /dispositivos/{id}/energia ya
+# rechaza con 403 a todo usuario con rol USUARIO antes de llegar aquí ("Tu rol
+# (Hijo/Hija) NO puede ejecutar comandos de energía"), así que la rama que permitía
+# a un USUARIO controlar el dispositivo que tuviera asignado nunca podía ejecutarse
+# y contradecía el mensaje de error mostrado al Hijo/Hija. Se deja una única regla
+# consistente: solo ADMIN_CASA controla energía.
 def puede_controlar_energia(usuario: dict, dispositivo: dict) -> bool:
-    if usuario["rol"] == ROL_ADMIN_CASA: return True
-    if usuario["id"] == dispositivo["asignado_a"]: return True
-    return False
+    return usuario["rol"] == ROL_ADMIN_CASA
 
 
 def obtener_dispositivo_de_la_casa(dev_id: int, usuario: dict) -> dict:
@@ -1595,9 +1715,18 @@ def obtener_dispositivo_de_la_casa(dev_id: int, usuario: dict) -> dict:
     return fila
 
 
-def es_equipo_local(dispositivo: dict) -> bool:
-    ip = (dispositivo.get("ip") or "").strip()
-    return ip in ("127.0.0.1", "localhost", "::1", "")
+# 🐛 FIX #1 (crítico, lógico): "es local" se decidía antes por la IP del dispositivo
+# (127.0.0.1/localhost). Eso etiquetaba como "estación local maestra" a CUALQUIER
+# fila cuya IP coincidiera, y los comandos de energía sobre ella se ejecutaban con
+# subprocess/shutdown directamente en el proceso del SERVIDOR (ver el antiguo
+# ejecutar_comando_local) — es decir, el botón "APAGAR" del panel podía apagar la
+# máquina que aloja el propio backend, no la laptop/celular del integrante. En el
+# modelo agentless, "local" pasa a significar "esta pestaña de navegador es la que
+# ejecuta la acción sobre sí misma", identificada por su device_uid propio (columna
+# 'token'), nunca por IP ni por ejecución de comandos del sistema operativo.
+def es_nodo_propio(dispositivo: dict, device_uid_actual: Optional[str]) -> bool:
+    token = (dispositivo.get("token") or "").strip()
+    return bool(token) and bool(device_uid_actual) and token == device_uid_actual
 
 
 def telemetria_del_servidor_local() -> dict:
@@ -1635,24 +1764,6 @@ def encolar_comando(dispositivo_id: int, accion: str):
             (dispositivo_id, accion, datetime.utcnow().isoformat()),
         )
         conexion.commit()
-
-
-def ejecutar_comando_local(accion: str) -> dict:
-    try:
-        if os.name == "nt":
-            if accion == "BLOQUEAR":
-                subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"], shell=True)
-                return {"mensaje": "Equipo bloqueado"}
-            if accion == "APAGAR":
-                subprocess.run(["shutdown", "/s", "/t", "5"], shell=True)
-                return {"mensaje": "Apagando en 5 segundos..."}
-            if accion == "REINICIAR":
-                subprocess.run(["shutdown", "/r", "/t", "5"], shell=True)
-                return {"mensaje": "Reiniciando en 5 segundos..."}
-        return {"mensaje": f"Comando '{accion}' registrado (modo nube)"}
-    except Exception as e:
-        log.exception("Fallo comando local %s", accion)
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===========================================================================
@@ -1725,11 +1836,22 @@ def usuarios_de_casa(codigo: str):
         return conexion.todos()
 
 
+# 🐛 FIX #4 (bypass de autenticación): esta ruta creaba integrantes nuevos sin exigir
+# NINGÚN PIN — solo el código de casa, que se comparte libremente con toda la
+# familia (se muestra en pantalla, se pasa por chat, etc.). Cualquiera con el código
+# podía crear cuentas sin ser Admin. Ahora exige PIN válido de ADMIN_CASA de esa
+# misma casa, igual que editar_usuario_admin y eliminar_usuario.
 @app.post("/casas/{codigo}/usuarios/crear")
-async def crear_usuario_en_casa(codigo: str, data: NuevoPerfilSchema):
+async def crear_usuario_en_casa(
+    codigo: str,
+    data: NuevoPerfilSchema,
+    usuario: dict = Depends(requerir_rol(ROL_ADMIN_CASA)),
+):
     casa = buscar_casa_por_codigo(codigo)
     if not casa:
         raise HTTPException(status_code=404, detail="No existe ninguna casa con ese código")
+    if casa["id"] != usuario["casa_id"]:
+        raise HTTPException(status_code=403, detail="No puedes crear integrantes en otra casa")
     if len(data.pin) < 4:
         raise HTTPException(status_code=400, detail="El PIN debe tener al menos 4 dígitos")
     with db() as conexion:
@@ -1887,10 +2009,13 @@ async def estadisticas_globales(usuario: dict = Depends(requerir_rol(ROL_MASTER)
 
 
 # ===========================================================================
-# 16 · DISPOSITIVOS
+# 16 · DISPOSITIVOS (AGENTLESS: cada nodo es una pestaña de navegador)
 # ===========================================================================
 @app.get("/dispositivos")
-async def listar_dispositivos(usuario: dict = Depends(verificar_pin)):
+async def listar_dispositivos(
+    usuario: dict = Depends(verificar_pin),
+    x_device_uid: Optional[str] = Header(None, alias="X-Device-Uid"),
+):
     if usuario["rol"] == ROL_MASTER:
         raise HTTPException(status_code=403, detail="Master usa /master/estadisticas")
     with db() as conexion:
@@ -1901,19 +2026,19 @@ async def listar_dispositivos(usuario: dict = Depends(verificar_pin)):
     for d in filas:
         if usuario["rol"] == ROL_USUARIO and d["asignado_a"] != usuario["id"]:
             continue
-        if es_equipo_local(d):
-            specs = telemetria_del_servidor_local()
-        else:
-            specs = {
-                "cpu": d["cpu"] or "Sin datos", "ram": d["ram"] or "Sin datos",
-                "disco": d["disco"] or "Sin datos", "bateria": d["bateria"] or "Sin datos",
-                "procesos": d["procesos"] or 0,
-            }
+        specs = {
+            "cpu": d["cpu"] or "Sin datos", "ram": d["ram"] or "Sin datos",
+            "disco": d["disco"] or "Sin foco registrado", "bateria": d["bateria"] or "Sin datos",
+            "procesos": d["procesos"] or 0,
+        }
         resultado.append({
             "id": d["id"], "nombre": d["nombre"], "tipo": d["tipo"],
             "ip": d["ip"], "mac": d["mac"], "ubicacion": d["ubicacion"],
             "lat": d["lat"], "lng": d["lng"], "estado": d["estado"],
-            "asignado_a": d["asignado_a"], "es_local": es_equipo_local(d), "specs": specs,
+            "asignado_a": d["asignado_a"],
+            "es_local": es_nodo_propio(d, x_device_uid),
+            "conectado": gestor_ws.esta_conectado(d.get("token") or ""),
+            "specs": specs,
         })
     return resultado
 
@@ -1942,29 +2067,101 @@ async def eliminar_dispositivo(dev_id: int, usuario: dict = Depends(requerir_rol
     return {"mensaje": f"Dispositivo '{dispositivo['nombre']}' eliminado"}
 
 
-@app.post("/dispositivos/generar-codigo")
-async def generar_codigo(data: CodigoVinculacionSchema, usuario: dict = Depends(requerir_rol(ROL_ADMIN_CASA))):
+@app.post("/dispositivos/registrar-nodo")
+async def registrar_nodo(
+    data: RegistroNodoSchema,
+    request: Request,
+    usuario: dict = Depends(verificar_pin),
+):
+    """
+    Reingeniería Agentless (punto 1): no hay código de vinculación aparte ni
+    script para descargar. En cuanto el integrante entra con el ÚNICO código
+    de la casa y su PIN, su propia pestaña se anuncia aquí y queda enlazada
+    como un nodo controlado — sin instalar nada.
+    """
+    if usuario["rol"] == ROL_MASTER:
+        raise HTTPException(status_code=403, detail="Master no administra nodos de una casa")
+    ip_origen = request.client.host if request.client else ""
+    ahora = datetime.utcnow().isoformat()
     with db() as conexion:
-        codigo = generar_codigo_vinculacion()
-        conexion.ejecutar("SELECT 1 FROM codigos_vinculacion WHERE codigo = ?", (codigo,))
-        while conexion.uno():
-            codigo = generar_codigo_vinculacion()
-            conexion.ejecutar("SELECT 1 FROM codigos_vinculacion WHERE codigo = ?", (codigo,))
-        expira_en = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
         conexion.ejecutar(
-            "INSERT INTO codigos_vinculacion (casa_id, codigo, nombre_sugerido, tipo_sugerido, expira_en, usado) "
-            "VALUES (?, ?, ?, 'pc', ?, 0)",
-            (usuario["casa_id"], codigo, data.nombre_dispositivo or "", expira_en),
+            "SELECT * FROM dispositivos WHERE casa_id = ? AND token = ?",
+            (usuario["casa_id"], data.device_uid),
         )
+        existente = conexion.uno()
+        if existente:
+            conexion.ejecutar(
+                "UPDATE dispositivos SET nombre = ?, tipo = ?, ip = ?, estado = 'ONLINE', "
+                "asignado_a = ?, actualizado_en = ? WHERE id = ?",
+                (data.nombre, data.tipo, ip_origen, usuario["id"], ahora, existente["id"]),
+            )
+            dev_id = existente["id"]
+        else:
+            conexion.ejecutar(
+                "INSERT INTO dispositivos (casa_id, nombre, tipo, ip, mac, token, ubicacion, "
+                "estado, asignado_a, actualizado_en) "
+                "VALUES (?, ?, ?, ?, '', ?, 'Ubicación no establecida', 'ONLINE', ?, ?)",
+                (usuario["casa_id"], data.nombre, data.tipo, ip_origen, data.device_uid, usuario["id"], ahora),
+                es_insert=True,
+            )
+            dev_id = conexion.id_insertado()
         conexion.commit()
-    return {"codigo": codigo, "expira_en": expira_en, "valido_minutos": 10}
+    try:
+        await gestor_ws.broadcast({"event": "INTEGRANTES_ACTUALIZADOS", "casa_id": usuario["casa_id"]})
+    except Exception:
+        pass
+    return {"mensaje": "Nodo enlazado a la casa", "dispositivo_id": dev_id}
+
+
+@app.post("/dispositivos/telemetria-web")
+async def telemetria_web(data: TelemetriaWebSchema, usuario: dict = Depends(verificar_pin)):
+    """
+    Reingeniería Agentless (punto 2): telemetría capturada 100% con Web APIs
+    nativas del navegador del integrante (batería real, hilos lógicos, memoria
+    aproximada, título de la pestaña activa) y transmitida por este endpoint.
+    """
+    if usuario["rol"] == ROL_MASTER:
+        raise HTTPException(status_code=403, detail="No aplica a Master")
+    with db() as conexion:
+        conexion.ejecutar(
+            "SELECT * FROM dispositivos WHERE casa_id = ? AND token = ?",
+            (usuario["casa_id"], data.device_uid),
+        )
+        dispositivo = conexion.uno()
+        if not dispositivo:
+            raise HTTPException(status_code=404, detail="Nodo no registrado. Reingresa con el código de tu casa.")
+
+        campos, valores = ["actualizado_en = ?", "estado = 'ONLINE'"], [datetime.utcnow().isoformat()]
+        if data.cpu is not None:
+            campos.append("cpu = ?"); valores.append(data.cpu)
+        if data.ram is not None:
+            campos.append("ram = ?"); valores.append(data.ram)
+        if data.bateria is not None:
+            campos.append("bateria = ?"); valores.append(data.bateria)
+        if data.ventana_activa is not None:
+            campos.append("disco = ?"); valores.append(f"🪟 {data.ventana_activa}"[:250])
+        if data.hilos is not None:
+            campos.append("procesos = ?"); valores.append(data.hilos)
+        if data.lat is not None and data.lng is not None:
+            campos.append("lat = ?"); valores.append(data.lat)
+            campos.append("lng = ?"); valores.append(data.lng)
+            campos.append("ubicacion = ?"); valores.append(data.ubicacion or "Ubicación detectada")
+        valores.append(dispositivo["id"])
+        conexion.ejecutar(f"UPDATE dispositivos SET {', '.join(campos)} WHERE id = ?", tuple(valores))
+        conexion.commit()
+    return {"mensaje": "Telemetría recibida"}
 
 
 # ===========================================================================
-# 17 · ENERGÍA (bloqueo parental estricto)
+# 17 · ENERGÍA — DIRECTIVAS COMPATIBLES CON ENTORNOS WEB (sin agente/root)
 # ===========================================================================
 @app.post("/dispositivos/{dev_id}/energia")
-async def controlar_energia(dev_id: int, data: AccionEnergia, usuario: dict = Depends(verificar_pin)):
+async def controlar_energia(
+    dev_id: int,
+    data: AccionEnergia,
+    usuario: dict = Depends(verificar_pin),
+    x_device_uid: Optional[str] = Header(None, alias="X-Device-Uid"),
+):
     if usuario["rol"] == ROL_MASTER:
         raise HTTPException(status_code=403, detail="Master no controla dispositivos de casas")
     if usuario["rol"] == ROL_GESTOR_CASA:
@@ -1975,137 +2172,53 @@ async def controlar_energia(dev_id: int, data: AccionEnergia, usuario: dict = De
     dispositivo = obtener_dispositivo_de_la_casa(dev_id, usuario)
     if not puede_controlar_energia(usuario, dispositivo):
         raise HTTPException(status_code=403, detail="No tienes permiso sobre este dispositivo")
+    if es_nodo_propio(dispositivo, x_device_uid):
+        raise HTTPException(status_code=400, detail="⛔ Estación local maestra — no puedes controlar tu propia sesión")
 
     accion = data.accion.upper()
-
-    if es_equipo_local(dispositivo):
-        return ejecutar_comando_local(accion)
+    device_uid_objetivo = (dispositivo.get("token") or "").strip()
+    conectado = gestor_ws.esta_conectado(device_uid_objetivo)
 
     if accion == "ENCENDER":
-        if not dispositivo["mac"]:
-            raise HTTPException(status_code=400, detail="Este dispositivo no tiene MAC registrada para Wake-on-LAN")
-        try:
-            enviar_wol(dispositivo["mac"])
-            return {"mensaje": "Paquete Wake-on-LAN enviado a la red local"}
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        # Un nodo web conectado ya está "encendido": ENCENDER se traduce en
+        # desbloquear su pantalla (deshacer un BLOQUEAR/CONGELAR anterior).
+        if conectado:
+            entregado = await gestor_ws.enviar_a_dispositivo(
+                device_uid_objetivo, {"event": "COMANDO_ENERGIA", "accion": "DESBLOQUEAR"}
+            )
+            encolar_comando(dev_id, "DESBLOQUEAR")
+            if entregado:
+                return {"mensaje": "Pantalla desbloqueada en tiempo real."}
+            raise HTTPException(status_code=502, detail="No se pudo entregar el desbloqueo; intenta de nuevo.")
+        if dispositivo["mac"]:
+            try:
+                enviar_wol(dispositivo["mac"])
+                encolar_comando(dev_id, "ENCENDER (WOL)")
+                return {"mensaje": "Paquete Wake-on-LAN enviado a la red local"}
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="El dispositivo está desconectado y no tiene MAC para Wake-on-LAN")
 
+    # BLOQUEAR / APAGAR / REINICIAR: se empujan por WebSocket a la pestaña del
+    # integrante, que reacciona con el overlay Cyberpunk a pantalla completa,
+    # cierra la pestaña o recarga la sesión — sin ejecutar nada en el servidor.
     encolar_comando(dev_id, accion)
-    return {"mensaje": f"Comando '{accion}' encolado. Se ejecutará cuando el Agente lo reciba."}
+    if not conectado:
+        return {
+            "mensaje": f"'{dispositivo['nombre']}' está desconectado ahora mismo; el comando quedó registrado.",
+            "entregado": False,
+        }
+    entregado = await gestor_ws.enviar_a_dispositivo(device_uid_objetivo, {"event": "COMANDO_ENERGIA", "accion": accion})
+    if entregado:
+        return {"mensaje": f"Comando '{accion}' enviado en tiempo real al navegador de '{dispositivo['nombre']}'."}
+    return {"mensaje": f"'{dispositivo['nombre']}' se desconectó justo ahora; el comando quedó registrado.", "entregado": False}
 
 
 # ===========================================================================
-# 18 · VINCULACIÓN AUTÓNOMA
+# 18 · (antes: VINCULACIÓN AUTÓNOMA por script descargable — eliminada)
 # ===========================================================================
-def _construir_script_agente(url_base: str, token: str) -> str:
-    return AGENTE_TEMPLATE.replace("__AEGIS_URL__", url_base).replace("__AEGIS_TOKEN__", token)
-
-
-def _pagina_error(titulo: str, mensaje: str) -> str:
-    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
-<title>Aegis OS — Error</title>
-<style>
-body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-background:#000;color:#94a3b8;font-family:system-ui,sans-serif;padding:24px}}
-.card{{background:linear-gradient(155deg,rgba(8,20,36,.95),rgba(2,6,23,.98));
-border:1px solid rgba(251,113,133,.35);border-radius:28px;padding:48px 36px;max-width:520px;
-text-align:center;box-shadow:0 0 90px -30px rgba(244,63,94,.6)}}
-h1{{font-family:'Orbitron',sans-serif;color:#fda4af;font-size:26px;margin:16px 0}}
-.icon{{font-size:56px}}
-</style></head><body><div class="card">
-<div class="icon">⚠</div><h1>{html.escape(titulo)}</h1><p>{html.escape(mensaje)}</p>
-</div></body></html>"""
-
-
-def _pagina_vincular(nombre: str, token: str, codigo: str, script: str) -> str:
-    script_b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    data_url = f"data:text/x-python;base64,{script_b64}"
-    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AEGIS FAMILY OS — Vinculación</title>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-<style>
-body{{margin:0;background:#000;color:#94a3b8;font-family:system-ui,sans-serif;padding:32px 20px;
-background-image:radial-gradient(circle at 15% 5%,rgba(6,182,212,.20),transparent 42%),
-radial-gradient(circle at 88% 12%,rgba(59,130,246,.16),transparent 45%);}}
-.wrap{{max-width:920px;margin:0 auto}}
-.card{{background:linear-gradient(155deg,rgba(8,20,36,.95),rgba(2,6,23,.98));
-border:1px solid rgba(34,211,238,.2);border-radius:32px;padding:40px 32px;
-box-shadow:0 0 110px -30px rgba(34,211,238,.6);margin-bottom:24px}}
-h1{{font-family:'Orbitron',sans-serif;font-size:26px;color:#67e8f9;letter-spacing:.12em;margin:0 0 8px}}
-.sub{{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.35em;color:rgba(103,232,249,.6);margin:0 0 28px}}
-.row{{background:rgba(2,6,23,.7);border:1px solid rgba(34,211,238,.15);border-radius:18px;padding:18px;margin-bottom:14px}}
-.row-label{{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.3em;color:#64748b;margin-bottom:6px}}
-.row-value{{font-family:'JetBrains Mono',monospace;font-size:14px;color:#67e8f9;word-break:break-all}}
-.token{{color:#fcd34d}}
-.btn{{display:inline-flex;width:100%;padding:22px;border-radius:20px;
-font-family:'Orbitron',sans-serif;font-weight:900;font-size:15px;letter-spacing:.18em;
-text-transform:uppercase;text-decoration:none;color:#a5f3fc;text-align:center;justify-content:center;
-border:1px solid rgba(34,211,238,.6);
-background:linear-gradient(150deg,rgba(34,211,238,.18),rgba(59,130,246,.08));
-box-shadow:0 0 44px -8px rgba(34,211,238,.9)}}
-pre{{background:#020617;border:1px solid rgba(34,211,238,.15);border-radius:16px;
-padding:18px;color:#67e8f9;font-size:11px;line-height:1.7;max-height:300px;overflow:auto}}
-ul{{font-family:'JetBrains Mono',monospace;font-size:11px;line-height:2;color:#94a3b8;padding-left:0;list-style:none}}
-ul li::before{{content:'▸ ';color:#22d3ee}}
-h2{{font-family:'Orbitron',sans-serif;font-size:13px;letter-spacing:.18em;color:#c084fc;margin:24px 0 10px}}
-</style></head><body>
-<div class="wrap"><div class="card">
-<h1>◆ DISPOSITIVO VINCULADO</h1>
-<p class="sub">AEGIS FAMILY OS · SISTEMA AUTÓNOMO</p>
-<div class="row"><div class="row-label">Nombre</div><div class="row-value">{html.escape(nombre)}</div></div>
-<div class="row"><div class="row-label">Código usado</div><div class="row-value">{html.escape(codigo)}</div></div>
-<div class="row"><div class="row-label">Token del agente</div><div class="row-value token">{html.escape(token)}</div></div>
-<h2>▶ Instalación automática</h2>
-<a class="btn" download="aegis_agente.py" href="{data_url}">📥 Descargar Agente e Instalar</a>
-<h2>▶ Instrucciones</h2>
-<ul>
-<li><b>Windows:</b> doble clic sobre aegis_agente.py (Python 3.10+).</li>
-<li><b>macOS / Linux:</b> <code>python3 aegis_agente.py</code></li>
-<li><b>Smart TV / Enchufe:</b> usar el agente o webhook compatible.</li>
-</ul>
-<h2>▶ Código fuente</h2>
-<pre>{html.escape(script)}</pre>
-</div></div></body></html>"""
-
-
-@app.get("/vincular/{codigo}", response_class=HTMLResponse)
-def vincular_autonomo(codigo: str, request: Request):
-    codigo = codigo.strip()
-    if not codigo or len(codigo) != 6 or not codigo.isdigit():
-        return HTMLResponse(_pagina_error("Código inválido", "El código debe tener 6 dígitos."), status_code=400)
-
-    with db() as conexion:
-        conexion.ejecutar("SELECT * FROM codigos_vinculacion WHERE codigo = ?", (codigo,))
-        fila = conexion.uno()
-        if not fila:
-            return HTMLResponse(_pagina_error("Código no encontrado", "Verifica el código."), status_code=404)
-        if fila["usado"]:
-            return HTMLResponse(_pagina_error("Código ya utilizado", "Pide uno nuevo."), status_code=400)
-        try:
-            expira = datetime.fromisoformat(fila["expira_en"])
-        except (ValueError, TypeError):
-            expira = datetime.utcnow() - timedelta(seconds=1)
-        if expira < datetime.utcnow():
-            return HTMLResponse(_pagina_error("Código expirado", "Caducó a los 10 minutos."), status_code=400)
-
-        nombre_auto = (fila.get("nombre_sugerido") or "").strip() or f"Equipo-{secrets.token_hex(2).upper()}"
-        tipo_auto = fila.get("tipo_sugerido") or "pc"
-        ip_visitante = request.client.host if request.client else "desconocida"
-        token = secrets.token_hex(16)
-
-        conexion.ejecutar(
-            "INSERT INTO dispositivos (casa_id, nombre, tipo, ip, mac, token, ubicacion, estado) "
-            "VALUES (?, ?, ?, ?, '', ?, 'Pendiente de ubicación', 'ONLINE')",
-            (fila["casa_id"], nombre_auto, tipo_auto, ip_visitante, token),
-            es_insert=True,
-        )
-        conexion.ejecutar("UPDATE codigos_vinculacion SET usado = 1 WHERE id = ?", (fila["id"],))
-        conexion.commit()
-
-    base = _url_base(request)
-    script = _construir_script_agente(base, token)
-    return HTMLResponse(_pagina_vincular(nombre_auto, token, codigo, script))
+# (El antiguo flujo de /vincular/{codigo} con descarga de script Python fue
+# eliminado por completo — ver el registro de nodo agentless en la sección 16.)
 
 
 # ===========================================================================
@@ -2167,75 +2280,10 @@ async def webhook_mercado_pago(request: Request):
     }
 
 
-# ===========================================================================
-# 20 · AGENTE LOCAL
-# ===========================================================================
-def _agente_autenticado(x_device_token: Optional[str]) -> dict:
-    if not x_device_token:
-        raise HTTPException(status_code=401, detail="Falta X-Device-Token")
-    with db() as conexion:
-        conexion.ejecutar("SELECT * FROM dispositivos WHERE token = ?", (x_device_token,))
-        dispositivo = conexion.uno()
-    if not dispositivo:
-        raise HTTPException(status_code=403, detail="Token de dispositivo inválido")
-    return dispositivo
-
-
-@app.get("/agente/comando")
-def agente_obtener_comando(x_device_token: str = Header(None)):
-    dispositivo = _agente_autenticado(x_device_token)
-    with db() as conexion:
-        conexion.ejecutar(
-            "SELECT * FROM comandos WHERE dispositivo_id = ? AND estado = 'PENDIENTE' "
-            "ORDER BY creado_en ASC LIMIT 1",
-            (dispositivo["id"],),
-        )
-        comando = conexion.uno()
-        if comando:
-            conexion.ejecutar("UPDATE comandos SET estado = 'ENVIADO' WHERE id = ?", (comando["id"],))
-            conexion.commit()
-    if not comando:
-        return {"comando_id": None, "accion": None}
-    return {"comando_id": comando["id"], "accion": comando["accion"]}
-
-
-@app.post("/agente/comando/{comando_id}/completado")
-def agente_marcar_completado(comando_id: int, x_device_token: str = Header(None)):
-    dispositivo = _agente_autenticado(x_device_token)
-    with db() as conexion:
-        conexion.ejecutar(
-            "UPDATE comandos SET estado = 'EJECUTADO' WHERE id = ? AND dispositivo_id = ?",
-            (comando_id, dispositivo["id"]),
-        )
-        conexion.commit()
-    return {"mensaje": "Comando marcado como ejecutado"}
-
-
-@app.post("/agente/telemetria")
-def agente_reportar_telemetria(
-    data: TelemetriaAgenteSchema,
-    request: Request,
-    x_device_token: str = Header(None),
-):
-    dispositivo = _agente_autenticado(x_device_token)
-    ip_origen = request.client.host if request.client else None
-    with db() as conexion:
-        if ip_origen:
-            conexion.ejecutar(
-                "UPDATE dispositivos SET cpu = ?, ram = ?, disco = ?, bateria = ?, "
-                "procesos = ?, actualizado_en = ?, estado = 'ONLINE', ip = ? WHERE id = ?",
-                (data.cpu, data.ram, data.disco, data.bateria, data.procesos,
-                 datetime.utcnow().isoformat(), ip_origen, dispositivo["id"]),
-            )
-        else:
-            conexion.ejecutar(
-                "UPDATE dispositivos SET cpu = ?, ram = ?, disco = ?, bateria = ?, "
-                "procesos = ?, actualizado_en = ?, estado = 'ONLINE' WHERE id = ?",
-                (data.cpu, data.ram, data.disco, data.bateria, data.procesos,
-                 datetime.utcnow().isoformat(), dispositivo["id"]),
-            )
-        conexion.commit()
-    return {"mensaje": "Telemetría recibida", "ip_registrada": ip_origen}
+# (El antiguo "20 · AGENTE LOCAL" con endpoints /agente/comando y
+# /agente/telemetria para un proceso Python externo fue eliminado: en el
+# modelo agentless esas funciones las cubren /dispositivos/registrar-nodo,
+# /dispositivos/telemetria-web y el push en tiempo real por WebSocket.)
 
 
 # ===========================================================================
@@ -2251,6 +2299,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 msg = await websocket.receive_text()
                 if msg == "ping":
                     await websocket.send_json({"event": "pong"})
+                    continue
+                try:
+                    data = json.loads(msg)
+                except (ValueError, TypeError):
+                    continue
+                if data.get("tipo") == "registro" and data.get("device_uid"):
+                    gestor_ws.registrar_dispositivo(str(data["device_uid"])[:128], websocket)
+                    await websocket.send_json({"event": "NODO_ENLAZADO"})
             except WebSocketDisconnect:
                 break
     except Exception:
