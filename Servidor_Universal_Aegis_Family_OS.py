@@ -801,10 +801,9 @@ if __name__ == "__main__":
     # ==============================================================================
 
 
-   # ==============================================================================
-# ENLACE DE ENTRADA PRINCIPAL (OBLIGADO EN LA RAÍZ FUERA DE FUNCIONES)
+# ENLACE DE ENTRADA PRINCIPAL (USANDO TU VARIABLE REAL OBJETO_APP)
 # ==============================================================================
-@app.get("/", response_class=HTMLResponse)
+@objeto_app.get("/", response_class=HTMLResponse)
 async def cargar_interfaz_principal():
     from fastapi.responses import HTMLResponse
     return HTMLResponse(content=HTML_DASHBOARD, status_code=200)
@@ -814,7 +813,7 @@ if __name__ == "__main__":
     # Buscamos el puerto dinámico que exige la red de Render
     puerto_dinamico = int(os.getenv("PORT", 8000))
     print(f"[AEGIS-SAAS] Levantando en puerto: {puerto_dinamico}")
-    uvicorn.run(app, host="0.0.0.0", port=puerto_dinamico)
+    uvicorn.run(objeto_app, host="0.0.0.0", port=puerto_dinamico)
 
 
 
