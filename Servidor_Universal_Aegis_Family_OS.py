@@ -761,15 +761,14 @@ HTML_DASHBOARD = """
 """
 
 
-# =============================================================================
-# PUNTO DE ENTRADA
-# =============================================================================
 if __name__ == "__main__":
-    modo = sys.argv[1] if len(sys.argv) > 1 else "server"
-    if modo == "agent":
-        run_agent()
-    elif modo == "server":
-        run_server()
-    else:
-        print("Uso: python Aegis_Family_OS.py [server|agent]")
-        sys.exit(1)
+    import uvicorn
+    # Importación dinámica de emergencia para saltar el bloqueo de funciones
+    import Servidor_Universal_Aegis_Family_OS as maestro
+    
+    puerto_dinamico = int(os.getenv("PORT", 8000))
+    print(f"[AEGIS-SAAS] Levantando servidor en el puerto: {puerto_dinamico}")
+    
+    # Usamos la referencia directa del módulo para que no lance error
+    uvicorn.run(maestro.app, host="0.0.0.0", port=puerto_dinamico)
+
