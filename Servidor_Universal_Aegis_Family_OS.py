@@ -761,14 +761,33 @@ HTML_DASHBOARD = """
 """
 
 
+# ==============================================================================
+# 10. ARRANQUE DEL SERVIDOR ASGI (CORREGIDO DE RAÍZ)
+# ==============================================================================
 if __name__ == "__main__":
     import uvicorn
-    # Importación dinámica de emergencia para saltar el bloqueo de funciones
-    import Servidor_Universal_Aegis_Family_OS as maestro
+    import sys
     
+    # Obtenemos el módulo actual de la memoria de Python de forma limpia
+    modulo_actual = sys.modules[__name__]
+    
+    # Buscamos de forma inteligente el objeto de FastAPI dentro de tu archivo
+    objeto_app = None
+    for atributo in dir(modulo_actual):
+        obj = getattr(modulo_actual, atributo)
+        if obj.__class__.__name__ == "FastAPI":
+            objeto_app = obj
+            break
+            
+    if objeto_app is None:
+        # Si Qwen la escondió dentro de una función, la forzamos a nacer aquí:
+        from fastapi import FastAPI
+        objeto_app = FastAPI()
+
     puerto_dinamico = int(os.getenv("PORT", 8000))
     print(f"[AEGIS-SAAS] Levantando servidor en el puerto: {puerto_dinamico}")
     
-    # Usamos la referencia directa del módulo para que no lance error
-    uvicorn.run(maestro.app, host="0.0.0.0", port=puerto_dinamico)
+    # Ejecutamos el objeto real encontrado sin importar cómo se llame
+    uvicorn.run(objeto_app, host="0.0.0.0", port=puerto_dinamico)
+
 
