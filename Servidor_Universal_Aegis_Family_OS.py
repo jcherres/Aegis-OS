@@ -331,6 +331,28 @@ def init_db():
         )
     """)
 
+    # -----------------------------------------------------------------
+    # FIX #1 (concurrencia/duplicados) — red de seguridad a nivel de esquema:
+    # índice ÚNICO PARCIAL sobre (casa_id, token) para filas con token no
+    # vacío. El endpoint 'registrar-nodo' ya hace SELECT antes de decidir
+    # INSERT/UPDATE, pero dos peticiones casi simultáneas de la MISMA
+    # pestaña (doble refresco, reconexión de red) podrían pasar ambas el
+    # SELECT antes de que la primera termine su INSERT. Este índice hace
+    # que la base de datos rechace el segundo INSERT duplicado; el
+    # endpoint atrapa ese conflicto y lo convierte en un UPDATE normal.
+    # -----------------------------------------------------------------
+    try:
+        conexion.ejecutar(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_dispositivos_casa_token "
+            "ON dispositivos (casa_id, token) WHERE token <> ''"
+        )
+    except Exception as e:
+        log.warning(
+            "No se pudo crear índice único de dispositivos (%s). Puede haber "
+            "duplicados históricos de una versión anterior pendientes de limpieza.",
+            e,
+        )
+
     conexion.ejecutar("SELECT COUNT(*) AS total FROM usuarios WHERE rol = ?", (ROL_MASTER,))
     if conexion.uno()["total"] == 0:
         salt = generar_salt()
@@ -2083,6 +2105,15 @@ async def registrar_nodo(
         raise HTTPException(status_code=403, detail="Master no administra nodos de una casa")
     ip_origen = request.client.host if request.client else ""
     ahora = datetime.utcnow().isoformat()
+
+    def _actualizar_existente(conexion: ConexionDB, fila_id: int) -> int:
+        conexion.ejecutar(
+            "UPDATE dispositivos SET nombre = ?, tipo = ?, ip = ?, estado = 'ONLINE', "
+            "asignado_a = ?, actualizado_en = ? WHERE id = ?",
+            (data.nombre, data.tipo, ip_origen, usuario["id"], ahora, fila_id),
+        )
+        return fila_id
+
     with db() as conexion:
         conexion.ejecutar(
             "SELECT * FROM dispositivos WHERE casa_id = ? AND token = ?",
@@ -2090,21 +2121,38 @@ async def registrar_nodo(
         )
         existente = conexion.uno()
         if existente:
-            conexion.ejecutar(
-                "UPDATE dispositivos SET nombre = ?, tipo = ?, ip = ?, estado = 'ONLINE', "
-                "asignado_a = ?, actualizado_en = ? WHERE id = ?",
-                (data.nombre, data.tipo, ip_origen, usuario["id"], ahora, existente["id"]),
-            )
-            dev_id = existente["id"]
+            dev_id = _actualizar_existente(conexion, existente["id"])
         else:
-            conexion.ejecutar(
-                "INSERT INTO dispositivos (casa_id, nombre, tipo, ip, mac, token, ubicacion, "
-                "estado, asignado_a, actualizado_en) "
-                "VALUES (?, ?, ?, ?, '', ?, 'Ubicación no establecida', 'ONLINE', ?, ?)",
-                (usuario["casa_id"], data.nombre, data.tipo, ip_origen, data.device_uid, usuario["id"], ahora),
-                es_insert=True,
-            )
-            dev_id = conexion.id_insertado()
+            try:
+                conexion.ejecutar(
+                    "INSERT INTO dispositivos (casa_id, nombre, tipo, ip, mac, token, ubicacion, "
+                    "estado, asignado_a, actualizado_en) "
+                    "VALUES (?, ?, ?, ?, '', ?, 'Ubicación no establecida', 'ONLINE', ?, ?)",
+                    (usuario["casa_id"], data.nombre, data.tipo, ip_origen, data.device_uid, usuario["id"], ahora),
+                    es_insert=True,
+                )
+                dev_id = conexion.id_insertado()
+            except Exception as e:
+                # Condición de carrera: otra petición concurrente de la misma
+                # pestaña ya insertó esta fila (casa_id, token) y chocó contra
+                # el índice único 'ux_dispositivos_casa_token'. Se recupera esa
+                # fila y esta llamada se convierte en UPDATE — nunca se deja
+                # una segunda fila duplicada para el mismo nodo físico.
+                log.warning(
+                    "Conflicto de inserción en registrar-nodo (%s); "
+                    "recuperando fila existente y aplicando UPDATE.", e,
+                )
+                conexion.ejecutar(
+                    "SELECT * FROM dispositivos WHERE casa_id = ? AND token = ?",
+                    (usuario["casa_id"], data.device_uid),
+                )
+                fila_recuperada = conexion.uno()
+                if not fila_recuperada:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="No se pudo registrar ni recuperar el nodo tras el conflicto de concurrencia.",
+                    )
+                dev_id = _actualizar_existente(conexion, fila_recuperada["id"])
         conexion.commit()
     try:
         await gestor_ws.broadcast({"event": "INTEGRANTES_ACTUALIZADOS", "casa_id": usuario["casa_id"]})
@@ -2180,8 +2228,29 @@ async def controlar_energia(
     conectado = gestor_ws.esta_conectado(device_uid_objetivo)
 
     if accion == "ENCENDER":
-        # Un nodo web conectado ya está "encendido": ENCENDER se traduce en
-        # desbloquear su pantalla (deshacer un BLOQUEAR/CONGELAR anterior).
+        # -----------------------------------------------------------------
+        # FIX #3 — ENCENDER consulta explícitamente el campo 'estado' que
+        # guarda la base de datos:
+        #   · estado == 'OFFLINE' → el nodo no tiene sesión web activa; se
+        #     emite un paquete Wake-on-LAN real por broadcast en la red local
+        #     usando la MAC registrada (enviar_wol).
+        #   · en cualquier otro caso con WebSocket conectado → el nodo ya
+        #     está "encendido" (tiene su pestaña abierta); ENCENDER se
+        #     traduce en deshacer un BLOQUEAR/CONGELAR previo (DESBLOQUEAR).
+        # -----------------------------------------------------------------
+        if dispositivo.get("estado") == "OFFLINE":
+            if not dispositivo["mac"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="El dispositivo está OFFLINE y no tiene MAC registrada para Wake-on-LAN",
+                )
+            try:
+                enviar_wol(dispositivo["mac"])
+                encolar_comando(dev_id, "ENCENDER (WOL)")
+                return {"mensaje": f"Paquete Wake-on-LAN enviado a la red local para '{dispositivo['nombre']}'."}
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         if conectado:
             entregado = await gestor_ws.enviar_a_dispositivo(
                 device_uid_objetivo, {"event": "COMANDO_ENERGIA", "accion": "DESBLOQUEAR"}
@@ -2190,6 +2259,10 @@ async def controlar_energia(
             if entregado:
                 return {"mensaje": "Pantalla desbloqueada en tiempo real."}
             raise HTTPException(status_code=502, detail="No se pudo entregar el desbloqueo; intenta de nuevo.")
+
+        # Estado ONLINE en base de datos pero sin WebSocket activo en este
+        # instante (p. ej. la pestaña se cerró hace poco y aún no se marcó
+        # OFFLINE): se intenta WOL igualmente si hay MAC disponible.
         if dispositivo["mac"]:
             try:
                 enviar_wol(dispositivo["mac"])
